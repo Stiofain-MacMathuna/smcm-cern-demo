@@ -225,47 +225,63 @@ const fetchTelemetry = async () => {
   if (currentApp.value !== 'telemetry') return
 
   try {
-    const response = await axios.get('http://localhost:8080/api/v1/telemetry/history')
+    // Relative path for environment portability
+    const response = await axios.get('/api/v1/telemetry/history')
 
     if (response.data && response.data.length > 0) {
-      const data = response.data[0]
-      const timeStr = new Date().toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit'
-      });
+      // 1. Process the most recent data point for KPIs
+      // Assuming API returns newest first (Standard for history APIs)
+      const latest = response.data[0]
+      const intensityValue = Number(latest.value)
+      const energyValue = Number(latest.energy) || 0
+      const machineStatus = latest.status || 'NO BEAM'
 
-      const intensityValue = Number(data.value);
-      const energyValue = Number(data.energy) || 0;
-      const machineStatus = data.status || 'NO BEAM';
+      beamStatus.value = machineStatus
+      beamEnergy.value = energyValue
 
-      // Update Dashboard KPIs
-      beamStatus.value = machineStatus;
-      beamEnergy.value = energyValue;
+      // 2. Update the Chart
+      // If the chart is empty (first load), populate it with the full history
+      if (telemetryHistory.value.length === 0) {
+        // Reverse because Chart.js expects chronological order (Left to Right)
+        const history = [...response.data].reverse().slice(-30)
+        telemetryHistory.value = history.map(d => Number(d.value))
+        telemetryLabels.value = history.map(d => {
+          // Use timestamp from server if available, otherwise use local time
+          const dateSource = d.timestamp ? new Date(d.timestamp) : new Date()
+          return dateSource.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        })
+      } else {
+        // If already running, just push the newest point (standard "live" feel)
+        const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 
-      if (!isNaN(intensityValue)) {
-        telemetryHistory.value.push(intensityValue);
-        telemetryLabels.value.push(timeStr);
+        if (!isNaN(intensityValue)) {
+          telemetryHistory.value.push(intensityValue)
+          telemetryLabels.value.push(timeStr)
 
-        if (telemetryHistory.value.length > 30) {
-          telemetryHistory.value.shift();
-          telemetryLabels.value.shift();
+          // Keep sliding window of 30 points
+          if (telemetryHistory.value.length > 30) {
+            telemetryHistory.value.shift()
+            telemetryLabels.value.shift()
+          }
         }
       }
 
-      heartbeatCounter++;
+      // 3. Handle Audit Feed Heartbeat
+      heartbeatCounter++
       if (heartbeatCounter >= 5) {
+        const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
         auditFeed.value.unshift({
           id: Date.now(),
           time: timeStr,
           action: 'JAVA LINK OK',
           detail: `BCTDC confirmed at ${intensityValue.toExponential(2)} p+. Status: ${machineStatus}`
-        });
-        heartbeatCounter = 0;
+        })
+        heartbeatCounter = 0
       }
     }
   } catch (err) {
-    console.error("Uplink Failure: Java Telemetry Service (8080) is unreachable.", err);
+    // Log as a generic uplink failure to keep console clean for recruiters
+    console.error("Telemetry Uplink Offline: Check Java Spring Boot logs on EC2.", err)
   }
 }
 
