@@ -73,9 +73,7 @@ chmod +x deploy.sh
 ```
 
 **Access Locally:** http://localhost
-
 **Django Admin:** http://localhost/admin
-
 **Java API:** http://localhost:8080/api/v1/telemetry/history
 
 ## Testing
@@ -85,8 +83,8 @@ The system includes a comprehensive suite of integration tests to ensure data in
 **Backend Integration Tests (Django)**
 
 Validates API security, KPI accuracy, and shift scheduling logic.
-Bash
-```
+
+```bash
 docker compose exec backend python manage.py test
 ```
 
@@ -96,8 +94,8 @@ Coverage includes Dashboard metrics, Shift CRUD operations, and Analysis lifecyc
 
 Ensures UI components and telemetry mapping logic remain stable.
 
-Bash
-```
+
+```bash
 cd frontend && npm run test:unit                                        
 ```
 
