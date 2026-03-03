@@ -73,7 +73,9 @@ chmod +x deploy.sh
 ```
 
 **Access Locally:** http://localhost
+
 **Django Admin:** http://localhost/admin
+
 **Java API:** http://localhost:8080/api/v1/telemetry/history
 
 ## Testing
