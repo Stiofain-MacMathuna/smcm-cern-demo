@@ -10,7 +10,7 @@
 ![Django](https://img.shields.io/badge/Django-5-092E20?logo=django&logoColor=white)
 ![AWS](https://img.shields.io/badge/AWS-EC2-FF9900?logo=amazonec2&logoColor=white)
 
-**Live Demo:** [https://smc-cern-demo.com](https://smc-cern-demo.com)  
+**Live Demo:** [https://smcm-cern-demo.com](https://smcm-cern-demo.com)  
 *(Login: `cern` / `cms123`)*
 
 ## Overview
