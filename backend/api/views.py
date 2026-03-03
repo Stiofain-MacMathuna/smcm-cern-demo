@@ -1,8 +1,10 @@
 import csv
+import requests
 from datetime import date
 from django.http import HttpResponse
+from django.core.cache import cache
 from rest_framework import viewsets, filters, status
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticatedOrReadOnly
 from rest_framework.pagination import PageNumberPagination
@@ -34,14 +36,8 @@ class MemberViewSet(viewsets.ModelViewSet):
     serializer_class = MemberSerializer
     pagination_class = StandardResultsSetPagination
     permission_classes = [IsAuthenticatedOrReadOnly]
-
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-
-    search_fields = [
-        'first_name', 'last_name', 'cern_id', 'email',
-        'institute__name', 'institute__code'
-    ]
-
+    search_fields = ['first_name', 'last_name', 'cern_id', 'email', 'institute__name', 'institute__code']
     filterset_fields = {
         'is_active': ['exact'],
         'cern_status': ['exact'],
@@ -49,7 +45,6 @@ class MemberViewSet(viewsets.ModelViewSet):
         'institute__country': ['exact'],
         'institute__name': ['icontains'],
     }
-
     ordering_fields = ['last_name', 'cern_id', 'institute__name']
 
     @action(detail=False, methods=['get'])
@@ -57,10 +52,8 @@ class MemberViewSet(viewsets.ModelViewSet):
         queryset = self.filter_queryset(self.get_queryset())
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = 'attachment; filename="members_export.csv"'
-
         writer = csv.writer(response)
         writer.writerow(['CERN_ID', 'First Name', 'Last Name', 'Institute', 'Status', 'MO_Qualified', 'Email'])
-
         for member in queryset:
             writer.writerow([
                 member.cern_id, member.first_name, member.last_name,
@@ -75,7 +68,6 @@ class AnalysisViewSet(viewsets.ModelViewSet):
     serializer_class = AnalysisSerializer
     pagination_class = StandardResultsSetPagination
     permission_classes = [IsAuthenticatedOrReadOnly]
-
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['title', 'ref_code', 'group', 'target_journal', 'status_text']
     filterset_fields = ['group', 'phase', 'status_text']
@@ -86,10 +78,8 @@ class AnalysisViewSet(viewsets.ModelViewSet):
         queryset = self.filter_queryset(self.get_queryset())
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = 'attachment; filename="analysis_export.csv"'
-
         writer = csv.writer(response)
         writer.writerow(['Ref Code', 'Group', 'Title', 'Phase', 'Status', 'Start Date'])
-
         for paper in queryset:
             writer.writerow([
                 paper.ref_code, paper.group, paper.title,
@@ -122,7 +112,6 @@ class QualificationViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticatedOrReadOnly]
 
 
-# --- DASHBOARD ANALYTICS VIEW ---
 class DashboardStatsView(APIView):
     permission_classes = [IsAuthenticatedOrReadOnly]
 
@@ -131,41 +120,17 @@ class DashboardStatsView(APIView):
         total_papers = Analysis.objects.count()
         upcoming_shifts = Shift.objects.filter(date__gte=date.today()).count()
         mo_qualified = Member.objects.filter(is_mo_qualified=True).count()
-
-        # 1. Top Institutes (Headcount) -  Grouped by NAME
-        top_institutes_data = Member.objects.values('institute__name') \
-            .annotate(count=Count('id')) \
-            .order_by('-count')[:10]
-
-        # 2. Shift Locations
-        shift_location_data = Shift.objects.values('location') \
-            .annotate(count=Count('id')) \
-            .order_by('-count')
-
-        # 3. Top Institutes by Shift Contribution
-        shift_institute_data = Shift.objects.values('member__institute__name') \
-            .annotate(count=Count('id')) \
-            .order_by('-count')[:8]
-
-        # 4. Journals
-        journal_data = Analysis.objects.values('target_journal') \
-            .annotate(count=Count('id')) \
-            .order_by('-count')
-
-        # 5. Contract Status
-        member_contract_data = Member.objects.values('cern_status') \
-            .annotate(count=Count('id')) \
-            .order_by('-count')
-
-        # 6. Lifecycle Phase
+        top_institutes_data = Member.objects.values('institute__name').annotate(count=Count('id')).order_by('-count')[
+            :10]
+        shift_location_data = Shift.objects.values('location').annotate(count=Count('id')).order_by('-count')
+        shift_institute_data = Shift.objects.values('member__institute__name').annotate(count=Count('id')).order_by(
+            '-count')[:8]
+        journal_data = Analysis.objects.values('target_journal').annotate(count=Count('id')).order_by('-count')
+        member_contract_data = Member.objects.values('cern_status').annotate(count=Count('id')).order_by('-count')
         phase_raw = Analysis.objects.values('phase').annotate(count=Count('id')).order_by('phase')
         phase_map = {0: 'Phase 0 (Idea)', 1: 'Phase 1 (Analysis)', 2: 'Phase 2 (Review)', 3: 'Published'}
         phase_data = [{'label': phase_map.get(x['phase'], 'Unknown'), 'count': x['count']} for x in phase_raw]
-
-        # 7. Paper Status
-        paper_status_data = Analysis.objects.values('status_text') \
-            .annotate(count=Count('id')) \
-            .order_by('-count')[:5]
+        paper_status_data = Analysis.objects.values('status_text').annotate(count=Count('id')).order_by('-count')[:5]
 
         return Response({
             "metrics": {
@@ -185,3 +150,45 @@ class DashboardStatsView(APIView):
                 "papers_status": paper_status_data
             }
         })
+
+
+# --- LHC TELEMETRY & POST-MORTEM CONTROL ---
+
+class LhcTelemetryView(APIView):
+    """
+    Acts as the data buffer between C++ Producer and Vue Consumer.
+    """
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get(self, request):
+        current_status = cache.get('beam_status', 'STABLE BEAMS')
+
+        last_data = cache.get('last_lhc_data')
+
+        if not last_data:
+            last_data = {
+                "value": 0,
+                "energy": 0,
+                "status": current_status
+            }
+        else:
+            last_data["status"] = current_status
+
+        return Response([last_data], status=status.HTTP_200_OK)
+
+    def post(self, request):
+        cache.set('last_lhc_data', request.data, 30)
+        return Response({"status": "received"}, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+def update_lhc_status(request):
+    new_status = request.data.get('status', 'NO BEAM')
+    cache.set('beam_status', new_status, None)
+    return Response({"status": new_status}, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+def get_lhc_status(request):
+    status_val = cache.get('beam_status', 'STABLE BEAMS')
+    return Response({"status": status_val}, status=status.HTTP_200_OK)

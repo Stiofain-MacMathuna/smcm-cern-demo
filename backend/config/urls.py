@@ -1,7 +1,11 @@
 from django.contrib import admin
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from api.views import InstituteViewSet, MemberViewSet, ShiftViewSet, AnalysisViewSet, DashboardStatsView
+from api.views import (
+    InstituteViewSet, MemberViewSet, ShiftViewSet,
+    AnalysisViewSet, DashboardStatsView, LhcTelemetryView,
+    update_lhc_status, get_lhc_status
+)
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
@@ -26,4 +30,8 @@ urlpatterns = [
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
 
     path('api/stats/', DashboardStatsView.as_view(), name='dashboard-stats'),
+
+    path('api/lhc-telemetry/', LhcTelemetryView.as_view(), name='lhc-telemetry'),
+    path('api/update-lhc-status/', update_lhc_status, name='update-lhc-status'),
+    path('api/get-lhc-status/', get_lhc_status, name='get-lhc-status'),
 ]

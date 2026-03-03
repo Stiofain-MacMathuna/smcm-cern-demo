@@ -25,7 +25,6 @@ INSTALLED_APPS = [
 
     # Local
     'api',
-    'telemetry',  # <--- STEP 1: ADD YOUR NEW APP HERE
 ]
 
 MIDDLEWARE = [
@@ -60,8 +59,6 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 # --- STEP 2: POSTGRESQL CONFIGURATION ---
-# We are switching from SQLite to Postgres.
-# This uses environment variables that match your docker-compose.yml
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -73,7 +70,6 @@ DATABASES = {
     }
 }
 
-# (Keep Password validation, Internationalization, and Static Files as they were)
 AUTH_PASSWORD_VALIDATORS = [
     { 'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator', },
     { 'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator', },
@@ -89,7 +85,6 @@ USE_TZ = True
 STATIC_URL = '/django_static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
-# --- STEP 3: CORS & REST CONFIG ---
 CORS_ALLOW_ALL_ORIGINS = True
 
 REST_FRAMEWORK = {

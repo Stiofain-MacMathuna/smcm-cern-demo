@@ -13,6 +13,7 @@ import java.util.concurrent.Executors;
 
 @RestController
 @RequestMapping("api/v1/telemetry")
+@CrossOrigin(origins = "*")
 public class TelemetryController {
 
     @Autowired

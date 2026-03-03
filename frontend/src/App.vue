@@ -1,15 +1,20 @@
 <script setup>
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import axios from 'axios'
+import { Line } from 'vue-chartjs'
+import { Chart as ChartJS, Title, Tooltip, Legend, LineElement, CategoryScale, LinearScale, PointElement, Filler } from 'chart.js'
+
+ChartJS.register(Title, Tooltip, Legend, LineElement, CategoryScale, LinearScale, PointElement, Filler)
 
 // --- STATE ---
-const currentApp = ref('directory')
+const currentApp = ref('telemetry')
 const loading = ref(true)
 const searchQuery = ref('')
 const sortBy = ref('last_name')
 const showFilters = ref(false)
 const showExportMenu = ref(false)
 const legacyMode = ref(false)
+let heartbeatCounter = 0
 
 // Filters state
 const filters = ref({ country: '', institute: '', mo_status: '', status: '', group: '', phase: '' })
@@ -21,6 +26,7 @@ let timeout = null
 const members = ref([])
 const papers = ref([])
 const stats = ref(null)
+const auditFeed = ref([])
 
 // Pagination
 const totalCount = ref(0)
@@ -52,12 +58,46 @@ const totalPages = computed(() => Math.ceil(totalCount.value / 20))
 // NOTIFICATION STATE
 const notification = ref({ show: false, message: '', type: 'success' })
 
+// --- TELEMETRY STATE & CHART CONFIG ---
+const telemetryHistory = ref([])
+let telemetryTimer = null
+const telemetryLabels = ref([]);
+const beamStatus = ref('NO BEAM');
+const beamEnergy = ref(0);
+
+const telemetryChartData = computed(() => ({
+  labels: telemetryLabels.value,
+  datasets: [{
+    label: 'Protons per Bunch (BCT)',
+    borderColor: '#0053A1',
+    backgroundColor: 'rgba(0, 83, 161, 0.1)',
+    data: [...telemetryHistory.value],
+    tension: 0.4,
+    pointRadius: 0,
+    fill: true
+  }]
+}))
+
+const telemetryChartOptions = {
+  responsive: true,
+  maintainAspectRatio: false,
+  animation: false,
+  scales: {
+    y: {
+      beginAtZero: true,
+      ticks: {
+        callback: (value) => value.toExponential(1)
+      }
+    }
+  }
+}
+
 // --- HELPER: NOTIFICATIONS ---
 const showNotification = (msg, type = 'success') => {
   notification.value = { show: true, message: msg, type: type }
   setTimeout(() => {
     notification.value.show = false
-  }, 3000) // Disappears after 3 seconds
+  }, 3000)
 }
 
 // --- MOCK AUDIT DATA ---
@@ -82,7 +122,6 @@ const calendarGrid = computed(() => {
   const firstDay = new Date(year, month, 1).getDay()
   const startOffset = firstDay === 0 ? 6 : firstDay - 1
   const daysInMonth = new Date(year, month + 1, 0).getDate()
-
   const days = []
   for (let i = 0; i < startOffset; i++) days.push(null)
   for (let i = 1; i <= daysInMonth; i++) days.push(i)
@@ -106,28 +145,25 @@ const getShiftsForDay = (day) => {
 // --- SHIFT MANAGEMENT ---
 const openDayManager = (day) => {
   if (!isLoggedIn.value) {
-    alert("Please log in (Admin Access) to manage shifts.")
-    return
+    showLoginModal.value = true;
+    showNotification("Admin login required to manage shifts", "error");
+    return;
   }
-  if (!day) return
-
-  const year = calendarDate.value.getFullYear()
-  const month = calendarDate.value.getMonth() + 1
-  const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-
-  const memberShifts = selectedMember.value.shifts || []
-  const existingShifts = memberShifts.filter(s => s.date === dateStr)
-
+  if (!day) return;
+  const year = calendarDate.value.getFullYear();
+  const month = calendarDate.value.getMonth() + 1;
+  const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  const memberShifts = selectedMember.value.shifts || [];
+  const existingShifts = memberShifts.filter(s => s.date === dateStr);
   selectedDayData.value = {
     date: dateStr,
     dayDisplay: `${day} ${monthNames[calendarDate.value.getMonth()]}`,
     shifts: existingShifts
-  }
-
-  newShift.value = { type: 'MORNING', location: 'P5 Control Room' }
-  shiftError.value = ''
-  showDayModal.value = true
-}
+  };
+  newShift.value = { type: 'MORNING', location: 'P5 Control Room' };
+  shiftError.value = '';
+  showDayModal.value = true;
+};
 
 const submitShift = async () => {
   try {
@@ -137,15 +173,10 @@ const submitShift = async () => {
       location: newShift.value.location,
       member: selectedMember.value.id
     }
-
     const response = await axios.post('/api/shifts/', payload)
-
     if (!selectedMember.value.shifts) selectedMember.value.shifts = []
-
     selectedMember.value.shifts.push(response.data)
     selectedDayData.value.shifts.push(response.data)
-
-    // Update Audit Log
     if (selectedMember.value.auditLogs) {
       selectedMember.value.auditLogs.unshift({
         id: Date.now(),
@@ -155,7 +186,6 @@ const submitShift = async () => {
         detail: `${newShift.value.type} - ${newShift.value.location} (${selectedDayData.value.date})`
       })
     }
-
     shiftError.value = ''
     showNotification("Shift successfully assigned", "success")
   } catch (err) {
@@ -169,14 +199,11 @@ const submitShift = async () => {
 
 const deleteShift = async (shiftId) => {
   if (!confirm("Remove this shift?")) return
-
   try {
     const shiftToRemove = selectedMember.value.shifts.find(s => s.id === shiftId)
     await axios.delete(`/api/shifts/${shiftId}/`)
     selectedMember.value.shifts = selectedMember.value.shifts.filter(s => s.id !== shiftId)
     selectedDayData.value.shifts = selectedDayData.value.shifts.filter(s => s.id !== shiftId)
-
-    // Update Audit Log
     if (selectedMember.value.auditLogs && shiftToRemove) {
       selectedMember.value.auditLogs.unshift({
         id: Date.now(),
@@ -192,52 +219,82 @@ const deleteShift = async (shiftId) => {
   }
 }
 
-// --- AXIOS CONFIG ---
-axios.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem('access_token')
-    if (token) config.headers['Authorization'] = `Bearer ${token}`
-    return config
-  },
-  (error) => Promise.reject(error)
-)
+// --- TELEMETRY LOGIC (PURE OBSERVER) ---
 
-axios.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    if (error.response && error.response.status === 401) {
-      localStorage.removeItem('access_token')
-      isLoggedIn.value = false
-      if (localStorage.getItem('access_token')) window.location.reload()
+const fetchTelemetry = async () => {
+  if (currentApp.value !== 'telemetry') return
+
+  try {
+    const response = await axios.get('http://localhost:8080/api/v1/telemetry/history')
+
+    if (response.data && response.data.length > 0) {
+      const data = response.data[0]
+      const timeStr = new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+
+      const intensityValue = Number(data.value);
+      const energyValue = Number(data.energy) || 0;
+      const machineStatus = data.status || 'NO BEAM';
+
+      // Update Dashboard KPIs
+      beamStatus.value = machineStatus;
+      beamEnergy.value = energyValue;
+
+      if (!isNaN(intensityValue)) {
+        telemetryHistory.value.push(intensityValue);
+        telemetryLabels.value.push(timeStr);
+
+        if (telemetryHistory.value.length > 30) {
+          telemetryHistory.value.shift();
+          telemetryLabels.value.shift();
+        }
+      }
+
+      heartbeatCounter++;
+      if (heartbeatCounter >= 5) {
+        auditFeed.value.unshift({
+          id: Date.now(),
+          time: timeStr,
+          action: 'JAVA LINK OK',
+          detail: `BCTDC confirmed at ${intensityValue.toExponential(2)} p+. Status: ${machineStatus}`
+        });
+        heartbeatCounter = 0;
+      }
     }
-    return Promise.reject(error)
+  } catch (err) {
+    console.error("Uplink Failure: Java Telemetry Service (8080) is unreachable.", err);
   }
-)
-
-// --- FETCHING ---
-const buildUrl = (endpoint, forExport = false) => {
-  const baseUrl = `/api/${endpoint}/`
-  const finalBase = forExport ? `${baseUrl}export/` : baseUrl
-
-  const query = searchQuery.value ? `?search=${encodeURIComponent(searchQuery.value)}` : '?'
-
-  let order = sortBy.value
-  if (currentApp.value === 'directory' && ['creation_date', 'phase', 'group'].includes(order)) order = 'last_name'
-  if (currentApp.value === 'analysis' && ['last_name', 'cern_id'].includes(order)) order = '-creation_date'
-
-  let url = `${finalBase}${query}&ordering=${order}`
-
-  if (currentApp.value === 'directory') {
-    if (filters.value.country) url += `&institute__country=${encodeURIComponent(filters.value.country)}`
-    if (filters.value.institute) url += `&institute__name__icontains=${encodeURIComponent(filters.value.institute)}`
-    if (filters.value.mo_status) url += `&is_mo_qualified=${filters.value.mo_status}`
-    if (filters.value.status) url += `&cern_status=${filters.value.status}`
-  } else {
-    if (filters.value.group) url += `&group=${filters.value.group}`
-    if (filters.value.phase) url += `&phase=${filters.value.phase}`
-  }
-  return url
 }
+
+// --- UI COMMANDS TO C++ VIA DJANGO ---
+
+const forceStateChange = async (targetState) => {
+  const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  try {
+    const cmd = targetState.toUpperCase();
+
+    showNotification(`Uplink: Requesting ${cmd}...`, "success");
+
+    auditFeed.value.unshift({
+      id: Date.now(),
+      time: timeStr,
+      action: 'CONTROL CMD',
+      detail: `Operator override: ${cmd}. Signal sent to LHC Bridge.`
+    });
+
+    await axios.post('/api/update-lhc-status/', { status: cmd });
+
+    setTimeout(fetchTelemetry, 500);
+
+  } catch (err) {
+    showNotification("Uplink Failed: C++ Engine Unreachable", "error");
+  }
+}
+
+// --- DATA FETCHING & SEARCH ---
 
 const fetchStats = async () => {
   loading.value = true
@@ -275,71 +332,66 @@ const fetchPapers = async (url = null) => {
 const loadData = () => {
   if (currentApp.value === 'dashboard') fetchStats()
   else if (currentApp.value === 'directory') fetchMembers()
-  else fetchPapers()
+  else if (currentApp.value === 'analysis') fetchPapers()
 }
 
-watch(currentApp, (newApp) => {
-  searchQuery.value = ''
-  filters.value = { country: '', institute: '', mo_status: '', status: '', group: '', phase: '' }
-  if (newApp === 'directory') sortBy.value = 'last_name'
-  else if (newApp === 'analysis') sortBy.value = '-creation_date'
-  loadData()
-})
-watch([sortBy, filters], () => loadData(), { deep: true })
+const buildUrl = (endpoint, forExport = false) => {
+  const baseUrl = `/api/${endpoint}/`
+  const finalBase = forExport ? `${baseUrl}export/` : baseUrl
+  const query = searchQuery.value ? `?search=${encodeURIComponent(searchQuery.value)}` : '?'
+  let order = sortBy.value
+  if (currentApp.value === 'directory' && ['creation_date', 'phase', 'group'].includes(order)) order = 'last_name'
+  if (currentApp.value === 'analysis' && ['last_name', 'cern_id'].includes(order)) order = '-creation_date'
+  let url = `${finalBase}${query}&ordering=${order}`
+  if (currentApp.value === 'directory') {
+    if (filters.value.country) url += `&institute__country=${encodeURIComponent(filters.value.country)}`
+    if (filters.value.institute) url += `&institute__name__icontains=${encodeURIComponent(filters.value.institute)}`
+    if (filters.value.mo_status) url += `&is_mo_qualified=${filters.value.mo_status}`
+    if (filters.value.status) url += `&cern_status=${filters.value.status}`
+  } else {
+    if (filters.value.group) url += `&group=${filters.value.group}`
+    if (filters.value.phase) url += `&phase=${filters.value.phase}`
+  }
+  return url
+}
 
 const onSearchInput = () => {
   clearTimeout(timeout)
   timeout = setTimeout(() => { loadData() }, 300)
 }
 
-const loadPage = (url, direction) => {
-  if (url) {
-    if (currentApp.value === 'directory') fetchMembers(url); else fetchPapers(url)
-    if (direction === 'next') currentPage.value++; if (direction === 'prev') currentPage.value--
-  }
-}
+// --- AUTH & AXIOS ---
+axios.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('access_token')
+    if (token) config.headers['Authorization'] = `Bearer ${token}`
+    return config
+  },
+  (error) => Promise.reject(error)
+)
 
-const triggerExport = (type) => {
-  showExportMenu.value = false
-  if (type === 'all') {
-    const endpoint = currentApp.value === 'directory' ? 'members' : 'analyses'
-    const exportUrl = buildUrl(endpoint, true)
-    window.location.href = exportUrl
-  } else {
-    downloadCurrentPage()
+axios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response && error.response.status === 401) {
+      localStorage.removeItem('access_token')
+      isLoggedIn.value = false
+      if (localStorage.getItem('access_token')) window.location.reload()
+    }
+    return Promise.reject(error)
   }
-}
-
-const downloadCurrentPage = () => {
-  const data = currentApp.value === 'directory' ? members.value : papers.value
-  if (!data || data.length === 0) return alert("No data to export")
-  let csvContent = "data:text/csv;charset=utf-8,"
-  if (currentApp.value === 'directory') {
-    csvContent += "CERN_ID,Last_Name,First_Name,Institute,Country,Status,MO_Qualified\n"
-    data.forEach(row => { csvContent += `${row.cern_id},"${row.last_name}","${row.first_name}","${row.institute_name}","${row.institute_country}",${row.cern_status},${row.is_mo_qualified}\n` })
-  } else {
-    csvContent += "RefCode,Experiment,Title,Phase,Status,AuthorCount\n"
-    data.forEach(row => { csvContent += `${row.ref_code},${row.group},"${row.title}",${row.phase_name},${row.status_text},${row.author_count}\n` })
-  }
-  const encodedUri = encodeURI(csvContent)
-  const link = document.createElement("a")
-  link.setAttribute("href", encodedUri)
-  link.setAttribute("download", `glance_page_${currentPage.value}.csv`)
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-}
+)
 
 const login = async () => {
   try {
     const response = await axios.post('/api/token/', { username: loginForm.value.username, password: loginForm.value.password })
     localStorage.setItem('access_token', response.data.access)
     isLoggedIn.value = true; showLoginModal.value = false; loadData()
-  } catch (err) { alert("Login failed! Ensure user 'cern' exists.") }
+  } catch (err) { alert("Login failed!") }
 }
 const logout = () => { localStorage.removeItem('access_token'); isLoggedIn.value = false; alert("Logged out.") }
 
-// OPEN MEMBER
+// --- MODAL CONTROLS ---
 const openMember = (member) => {
   selectedMember.value = member
   member.auditLogs = getAuditLog(member)
@@ -348,550 +400,711 @@ const openMember = (member) => {
   isEditing.value = false
   calendarDate.value = new Date()
 }
-
 const openPaper = (paper) => { selectedPaper.value = paper }
 const closeModals = () => { selectedMember.value = null; selectedPaper.value = null; isEditing.value = false }
+
 const saveMember = async () => {
   if (!selectedMember.value) return
   try {
-    // UPDATED: Relative URL for Docker/Nginx
     await axios.patch(`/api/members/${selectedMember.value.id}/`, editForm.value)
     Object.assign(selectedMember.value, editForm.value)
-    if (selectedMember.value.auditLogs) {
-      selectedMember.value.auditLogs.unshift({
-         id: Date.now(), date: new Date().toLocaleString(), user: 'Admin (You)', action: 'Updated Profile', detail: 'Manual Edit'
-      })
-    }
     isEditing.value = false
     showNotification("Profile updated successfully", "success")
   } catch (err) { alert("Failed to save.") }
 }
 
+// --- LIFECYCLE ---
+watch(currentApp, (newApp) => {
+  if (telemetryTimer) { clearInterval(telemetryTimer); telemetryTimer = null; }
+  if (newApp === 'telemetry') {
+    telemetryTimer = setInterval(fetchTelemetry, 1000);
+    fetchTelemetry();
+  } else {
+    loadData();
+  }
+  closeModals();
+  searchQuery.value = '';
+});
+
 onMounted(() => {
-  const token = localStorage.getItem('access_token'); if (token) isLoggedIn.value = true
-  loadData()
+  const token = localStorage.getItem('access_token');
+  if (token) isLoggedIn.value = true;
+
+  if (currentApp.value === 'telemetry') {
+    telemetryTimer = setInterval(fetchTelemetry, 1000);
+    fetchTelemetry();
+  } else {
+    loadData();
+  }
+
+  const now = new Date();
+  auditFeed.value = [
+    { id: 'init-1', time: new Date(now - 50000).toLocaleTimeString(), action: 'BRIDGE ESTABLISHED', detail: 'Live telemetry link to LHC Point 5 active.' },
+    { id: 'init-2', time: new Date(now - 120000).toLocaleTimeString(), action: 'LHC STATE CHANGE', detail: 'Machine transitioned to STABLE BEAMS.' }
+  ];
+})
+
+onUnmounted(() => {
+  if (telemetryTimer) clearInterval(telemetryTimer);
+  clearTimeout(timeout);
 })
 </script>
 
-<template>
-  <div :class="['layout', { 'legacy-mode': legacyMode }]">
+    <template>
+      <div :class="['layout', { 'legacy-mode': legacyMode }]">
 
-    <transition name="slide-fade">
-      <div v-if="notification.show" :class="['notification-toast', notification.type]">
-        <div class="toast-content">
-          <svg v-if="notification.type === 'success'" class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
-          <svg v-else class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-          <span>{{ notification.message }}</span>
-        </div>
-      </div>
-    </transition>
-
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="logo-box">CMS</div>
-        <h2>GLANCE</h2>
-      </div>
-      <div class="nav-section">
-        <div class="nav-label">Main Navigation</div>
-        <button @click="currentApp = 'dashboard'" :class="['nav-item', { active: currentApp === 'dashboard' }]">
-          <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg> Incubator Dashboard
-        </button>
-        <button @click="currentApp = 'directory'" :class="['nav-item', { active: currentApp === 'directory' }]">
-          <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path></svg> Member Directory
-        </button>
-        <button @click="currentApp = 'analysis'" :class="['nav-item', { active: currentApp === 'analysis' }]">
-          <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg> Analysis Tracker
-        </button>
-      </div>
-      <div class="legacy-toggle-box">
-         <label class="toggle-switch-small">
-           <input type="checkbox" v-model="legacyMode">
-           <span class="slider-small"></span>
-           <span class="label-small">Legacy Mode</span>
-         </label>
-      </div>
-      <div class="auth-box">
-        <div v-if="isLoggedIn" class="user-info">
-          <div class="avatar-small">A</div>
-          <div class="user-text"><strong>Administrator</strong><button @click="logout" class="link-logout">Sign Out</button></div>
-        </div>
-        <button v-else @click="showLoginModal = true" class="btn-login-side">Admin Access</button>
-      </div>
-    </aside>
-
-    <main class="main-content">
-      <header class="top-bar">
-        <div class="left-controls" v-if="currentApp !== 'dashboard'">
-          <div class="search-wrapper">
-            <svg class="search-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-            <input v-model="searchQuery" @input="onSearchInput" type="text" :placeholder="currentApp === 'directory' ? 'Search members, institutes, IDs...' : 'Search papers...'" />
+        <transition name="slide-fade">
+          <div v-if="notification.show" :class="['notification-toast', notification.type]">
+            <div class="toast-content">
+              <svg v-if="notification.type === 'success'" class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+              <svg v-else class="toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+              <span>{{ notification.message }}</span>
+            </div>
           </div>
-          <button @click="showFilters = !showFilters" :class="['btn-filter', { active: showFilters }]">
-            <svg class="icon-filter" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"></path></svg> Filters
-          </button>
-        </div>
-        <div class="left-controls" v-else>
-           <h2 class="page-title">Incubator Dashboard</h2>
-        </div>
-        <div class="controls-right" v-if="currentApp !== 'dashboard'">
-           <div class="export-wrapper">
-             <button @click="showExportMenu = !showExportMenu" class="btn-export">
-               <svg class="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg> Export
-             </button>
-             <div v-if="showExportMenu" class="export-menu fade-in-down" @click.self="showExportMenu = false">
-                <div class="menu-item" @click="triggerExport('page')"><span>Export Current Page</span><small>Visible rows only (CSV)</small></div>
-                <div class="menu-item" @click="triggerExport('all')"><span>Export All Data</span><small>Full dataset (CSV)</small></div>
-             </div>
-           </div>
-           <div class="header-divider"></div>
-           <div class="sort-control">
-             <span class="label">Sort by</span>
-             <select v-model="sortBy" class="sort-select">
-                <template v-if="currentApp === 'directory'">
-                  <option value="last_name">Alphabetical</option>
-                  <option value="cern_id">CERN ID</option>
-                  <option value="institute__name">Institute</option>
-                </template>
-                <template v-else>
-                  <option value="-creation_date">Newest</option>
-                  <option value="phase">Phase</option>
-                  <option value="group">Experiment</option>
-                </template>
-             </select>
-           </div>
-           <div class="header-divider"></div>
-           <span class="count-badge">{{ totalCount }} Records</span>
-        </div>
-      </header>
+        </transition>
 
-      <div v-if="showFilters && currentApp !== 'dashboard'" class="filter-panel fade-in-down">
-        <div class="filter-row">
-          <template v-if="currentApp === 'directory'">
-            <div class="filter-group">
-                <label>Institute Name</label>
-                <input v-model="filters.institute" placeholder="e.g. CERN, MIT..." class="filter-input"/>
+        <aside class="sidebar">
+          <div class="brand">
+            <div class="logo-box">CERN</div>
+            <h2>SMcM DEMO</h2>
+          </div>
+          <div class="nav-section">
+            <div class="nav-label">Main Navigation</div>
+            <button @click="currentApp = 'telemetry'" :class="['nav-item', { active: currentApp === 'telemetry' }]">
+              <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+              LHC Live Beam
+            </button>
+            <button @click="currentApp = 'dashboard'" :class="['nav-item', { active: currentApp === 'dashboard' }]">
+              <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg> Incubator Dashboard
+            </button>
+            <button @click="currentApp = 'directory'" :class="['nav-item', { active: currentApp === 'directory' }]">
+              <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path></svg> Member Directory
+            </button>
+            <button @click="currentApp = 'analysis'" :class="['nav-item', { active: currentApp === 'analysis' }]">
+              <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg> Analysis Tracker
+            </button>
+          </div>
+          <div class="legacy-toggle-box">
+             <label class="toggle-switch-small">
+               <input type="checkbox" v-model="legacyMode">
+               <span class="slider-small"></span>
+               <span class="label-small">Legacy Mode</span>
+             </label>
+          </div>
+          <div class="auth-box">
+            <div v-if="isLoggedIn" class="user-info">
+              <div class="avatar-small">A</div>
+              <div class="user-text"><strong>Administrator</strong><button @click="logout" class="link-logout">Sign Out</button></div>
             </div>
-            <div class="filter-group">
-                <label>Country</label>
-                <select v-model="filters.country">
-                    <option value="">All Countries</option>
-                    <optgroup label="Member States">
-                        <option value="Austria">Austria</option><option value="Belgium">Belgium</option><option value="Bulgaria">Bulgaria</option>
-                        <option value="Czech Republic">Czech Republic</option><option value="Denmark">Denmark</option><option value="Estonia">Estonia</option>
-                        <option value="Finland">Finland</option><option value="France">France</option><option value="Germany">Germany</option>
-                        <option value="Greece">Greece</option><option value="Hungary">Hungary</option><option value="Israel">Israel</option>
-                        <option value="Italy">Italy</option><option value="Netherlands">Netherlands</option><option value="Norway">Norway</option>
-                        <option value="Poland">Poland</option><option value="Portugal">Portugal</option><option value="Romania">Romania</option>
-                        <option value="Serbia">Serbia</option><option value="Slovakia">Slovakia</option><option value="Slovenia">Slovenia</option>
-                        <option value="Spain">Spain</option><option value="Sweden">Sweden</option><option value="Switzerland">Switzerland</option>
-                        <option value="United Kingdom">United Kingdom</option>
-                    </optgroup>
-                    <optgroup label="Partners & Associates">
-                        <option value="USA">USA</option><option value="China">China</option><option value="Japan">Japan</option>
-                        <option value="South Korea">South Korea</option><option value="India">India</option><option value="Brazil">Brazil</option>
-                        <option value="Ireland">Ireland</option><option value="Türkiye">Türkiye</option><option value="Ukraine">Ukraine</option>
-                        <option value="Pakistan">Pakistan</option><option value="Croatia">Croatia</option><option value="Cyprus">Cyprus</option>
-                        <option value="Latvia">Latvia</option><option value="Lithuania">Lithuania</option>
-                    </optgroup>
-                </select>
+            <button v-else @click="showLoginModal = true" class="btn-login-side">Admin Access</button>
+          </div>
+        </aside>
+
+        <main class="main-content">
+          <header class="top-bar">
+            <div class="left-controls" v-if="currentApp !== 'dashboard' && currentApp !== 'telemetry'">
+              <div class="search-wrapper">
+                <svg class="search-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                <input v-model="searchQuery" @input="onSearchInput" type="text" :placeholder="currentApp === 'directory' ? 'Search members, institutes, IDs...' : 'Search papers...'" />
+              </div>
+              <button @click="showFilters = !showFilters" :class="['btn-filter', { active: showFilters }]">
+                <svg class="icon-filter" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"></path></svg> Filters
+              </button>
             </div>
-            <div class="filter-group"><label>M&O Qualification</label><select v-model="filters.mo_status"><option value="">All</option><option value="true">Qualified</option><option value="false">Not Qualified</option></select></div>
-            <div class="filter-group"><label>Status</label><select v-model="filters.status"><option value="">All</option><option value="USER">User</option><option value="STAFF">Staff</option><option value="FELLOW">Fellow</option></select></div>
-          </template>
-          <template v-else>
-            <div class="filter-group"><label>Experiment</label><select v-model="filters.group"><option value="">All</option><option value="ATLAS">ATLAS</option><option value="CMS">CMS</option><option value="ALICE">ALICE</option><option value="LHCb">LHCb</option></select></div>
-            <div class="filter-group"><label>Phase</label><select v-model="filters.phase"><option value="">All</option><option value="0">Phase 0</option><option value="1">Phase 1</option><option value="2">Phase 2</option><option value="3">Published</option></select></div>
-          </template>
-          <button @click="filters = {country:'', institute: '', mo_status:'', status:'', group:'', phase:''}" class="btn-clear">Reset</button>
-        </div>
-      </div>
-
-      <div v-if="currentApp === 'dashboard' && stats" class="app-view fade-in">
-
-         <div class="kpi-grid">
-            <div class="kpi-card">
-               <div class="card-header-row">
-                  <div class="kpi-label">Total Members</div>
-                  <div class="tooltip-container" data-tooltip="Active personnel across all contract types (Staff, Users, Students).">ⓘ</div>
+            <div class="left-controls" v-else-if="currentApp === 'dashboard'">
+               <h2 class="page-title">Incubator Dashboard</h2>
+            </div>
+            <div class="left-controls" v-else>
+               <h2 class="page-title">LHC Live Telemetry</h2>
+            </div>
+            <div class="controls-right" v-if="currentApp !== 'dashboard' && currentApp !== 'telemetry'">
+               <div class="export-wrapper">
+                 <button @click="showExportMenu = !showExportMenu" class="btn-export">
+                   <svg class="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg> Export
+                 </button>
+                 <div v-if="showExportMenu" class="export-menu fade-in-down" @click.self="showExportMenu = false">
+                    <div class="menu-item" @click="triggerExport('page')"><span>Export Current Page</span><small>Visible rows only (CSV)</small></div>
+                    <div class="menu-item" @click="triggerExport('all')"><span>Export All Data</span><small>Full dataset (CSV)</small></div>
+                 </div>
                </div>
-               <div class="kpi-val">{{ stats.metrics.total_members }}</div>
-               <div class="kpi-sub">Registered in DB</div>
-            </div>
-            <div class="kpi-card">
-               <div class="card-header-row">
-                  <div class="kpi-label">M&O Authors</div>
-                  <div class="tooltip-container" data-tooltip="PhDs qualified for Maintenance & Operations (M&O) cost sharing.">ⓘ</div>
+               <div class="header-divider"></div>
+               <div class="sort-control">
+                 <span class="label">Sort by</span>
+                 <select v-model="sortBy" class="sort-select">
+                    <template v-if="currentApp === 'directory'">
+                      <option value="last_name">Alphabetical</option>
+                      <option value="cern_id">CERN ID</option>
+                      <option value="institute__name">Institute</option>
+                    </template>
+                    <template v-else>
+                      <option value="-creation_date">Newest</option>
+                      <option value="phase">Phase</option>
+                      <option value="group">Experiment</option>
+                    </template>
+                 </select>
                </div>
-               <div class="kpi-val text-success">{{ stats.metrics.mo_percent }}%</div>
-               <div class="kpi-sub">{{ stats.metrics.mo_qualified_count }} Qualified PhDs</div>
+               <div class="header-divider"></div>
+               <span class="count-badge">{{ totalCount }} Records</span>
             </div>
-            <div class="kpi-card">
-               <div class="card-header-row">
-                  <div class="kpi-label">Analyses</div>
-                  <div class="tooltip-container" data-tooltip="Total active and published analysis papers.">ⓘ</div>
-               </div>
-               <div class="kpi-val text-blue">{{ stats.metrics.total_papers }}</div>
-               <div class="kpi-sub">Active & Published</div>
-            </div>
-            <div class="kpi-card">
-               <div class="card-header-row">
-                  <div class="kpi-label">Upcoming Shifts</div>
-                  <div class="tooltip-container" data-tooltip="Shifts scheduled for the next 30 days.">ⓘ</div>
-               </div>
-               <div class="kpi-val text-purple">{{ stats.metrics.upcoming_shifts }}</div>
-               <div class="kpi-sub">Scheduled next 30 days</div>
-            </div>
-         </div>
+              <div class="controls-right" v-else-if="currentApp === 'telemetry'">
+                 <div class="bridge-status">
+                    <span class="pulse-dot"></span>
+                    Bridge Connected
+                 </div>
+              </div>
+          </header>
 
-         <div class="dashboard-grid">
+          <div v-if="showFilters && currentApp !== 'dashboard' && currentApp !== 'telemetry'" class="filter-panel fade-in-down">
+            <div class="filter-row">
+              <template v-if="currentApp === 'directory'">
+                <div class="filter-group">
+                    <label>Institute Name</label>
+                    <input v-model="filters.institute" placeholder="e.g. CERN, MIT..." class="filter-input"/>
+                </div>
+                <div class="filter-group">
+                    <label>Country</label>
+                    <select v-model="filters.country">
+                        <option value="">All Countries</option>
+                        <optgroup label="Member States">
+                            <option value="Austria">Austria</option><option value="Belgium">Belgium</option><option value="Bulgaria">Bulgaria</option>
+                            <option value="Czech Republic">Czech Republic</option><option value="Denmark">Denmark</option><option value="Estonia">Estonia</option>
+                            <option value="Finland">Finland</option><option value="France">France</option><option value="Germany">Germany</option>
+                            <option value="Greece">Greece</option><option value="Hungary">Hungary</option><option value="Israel">Israel</option>
+                            <option value="Italy">Italy</option><option value="Netherlands">Netherlands</option><option value="Norway">Norway</option>
+                            <option value="Poland">Poland</option><option value="Portugal">Portugal</option><option value="Romania">Romania</option>
+                            <option value="Serbia">Serbia</option><option value="Slovakia">Slovakia</option><option value="Slovenia">Slovenia</option>
+                            <option value="Spain">Spain</option><option value="Sweden">Sweden</option><option value="Switzerland">Switzerland</option>
+                            <option value="United Kingdom">United Kingdom</option>
+                        </optgroup>
+                        <optgroup label="Partners & Associates">
+                            <option value="USA">USA</option><option value="China">China</option><option value="Japan">Japan</option>
+                            <option value="South Korea">South Korea</option><option value="India">India</option><option value="Brazil">Brazil</option>
+                            <option value="Ireland">Ireland</option><option value="Türkiye">Türkiye</option><option value="Ukraine">Ukraine</option>
+                            <option value="Pakistan">Pakistan</option><option value="Croatia">Croatia</option><option value="Cyprus">Cyprus</option>
+                            <option value="Latvia">Latvia</option><option value="Lithuania">Lithuania</option>
+                        </optgroup>
+                    </select>
+                </div>
+                <div class="filter-group"><label>M&O Qualification</label><select v-model="filters.mo_status"><option value="">All</option><option value="true">Qualified</option><option value="false">Not Qualified</option></select></div>
+                <div class="filter-group"><label>Status</label><select v-model="filters.status"><option value="">All</option><option value="USER">User</option><option value="STAFF">Staff</option><option value="FELLOW">Fellow</option></select></div>
+              </template>
+              <template v-else>
+                <div class="filter-group"><label>Experiment</label><select v-model="filters.group"><option value="">All</option><option value="ATLAS">ATLAS</option><option value="CMS">CMS</option><option value="ALICE">ALICE</option><option value="LHCb">LHCb</option></select></div>
+                <div class="filter-group"><label>Phase</label><select v-model="filters.phase"><option value="">All</option><option value="0">Phase 0</option><option value="1">Phase 1</option><option value="2">Phase 2</option><option value="3">Published</option></select></div>
+              </template>
+              <button @click="filters = {country:'', institute: '', mo_status:'', status:'', group:'', phase:''}" class="btn-clear">Reset</button>
+            </div>
+          </div>
 
-            <div class="dashboard-col">
-               <div class="chart-card">
+          <div v-if="currentApp === 'dashboard' && stats" class="app-view fade-in">
+
+            <div class="kpi-grid">
+              <div class="kpi-card">
+                 <div class="card-header-row">
+                    <div class="kpi-label">Total Members</div>
+                    <div class="tooltip-container" data-tooltip="Active personnel across all contract types.">ⓘ</div>
+                 </div>
+                 <div class="kpi-val">{{ stats.metrics.total_members }}</div>
+                 <div class="kpi-sub">Registered in DB</div>
+              </div>
+              <div class="kpi-card">
+                 <div class="card-header-row">
+                    <div class="kpi-label">M&O Authors</div>
+                    <div class="tooltip-container" data-tooltip="PhDs qualified for M&O cost sharing.">ⓘ</div>
+                 </div>
+                 <div class="kpi-val text-success">{{ stats.metrics.mo_percent }}%</div>
+                 <div class="kpi-sub">{{ stats.metrics.mo_qualified_count }} Qualified PhDs</div>
+              </div>
+              <div class="kpi-card">
+                 <div class="card-header-row">
+                    <div class="kpi-label">Analyses</div>
+                    <div class="tooltip-container" data-tooltip="Total active and published analysis papers.">ⓘ</div>
+                 </div>
+                 <div class="kpi-val text-blue">{{ stats.metrics.total_papers }}</div>
+                 <div class="kpi-sub">Active & Published</div>
+              </div>
+              <div class="kpi-card">
+                 <div class="card-header-row">
+                    <div class="kpi-label">Upcoming Shifts</div>
+                    <div class="tooltip-container" data-tooltip="Shifts scheduled for the next 30 days.">ⓘ</div>
+                 </div>
+                 <div class="kpi-val text-purple">{{ stats.metrics.upcoming_shifts }}</div>
+                 <div class="kpi-sub">Scheduled next 30 days</div>
+              </div>
+            </div>
+
+            <div class="dashboard-grid">
+              <div class="dashboard-col">
+                 <div class="chart-card">
+                    <div class="card-header-row">
+                        <h3>Top Institutes (by Headcount)</h3>
+                    </div>
+                    <div class="bar-chart scrollable-sm">
+                       <div v-for="item in stats.charts.top_institutes" :key="item.institute__name" class="bar-row">
+                          <div class="bar-label" :title="item.institute__name">{{ item.institute__name.substring(0, 20) }}...</div>
+                          <div class="bar-track"><div class="bar-fill" :style="{ width: (item.count / 1200) * 100 + '%' }"></div></div>
+                          <div class="bar-val">{{ item.count }}</div>
+                       </div>
+                    </div>
+                 </div>
+                 <div class="chart-card">
+                    <div class="card-header-row">
+                        <h3>Workforce Composition</h3>
+                    </div>
+                    <div class="bar-chart">
+                       <div v-for="item in stats.charts.member_contracts" :key="item.cern_status" class="bar-row">
+                          <div class="bar-label">{{ item.cern_status }}</div>
+                          <div class="bar-track"><div class="bar-fill purple" :style="{ width: (item.count / 3000) * 100 + '%' }"></div></div>
+                          <div class="bar-val">{{ item.count }}</div>
+                       </div>
+                    </div>
+                 </div>
+              </div>
+
+              <div class="dashboard-col">
+                 <div class="chart-card">
+                    <div class="card-header-row">
+                        <h3>Shift Operations (Location)</h3>
+                    </div>
+                    <div class="bar-chart">
+                       <div v-for="item in stats.charts.shift_locations" :key="item.location" class="bar-row">
+                          <div class="bar-label">{{ item.location }}</div>
+                          <div class="bar-track"><div class="bar-fill orange" :style="{ width: (item.count / 1500) * 100 + '%' }"></div></div>
+                          <div class="bar-val">{{ item.count }}</div>
+                       </div>
+                    </div>
+                 </div>
+                 <div class="chart-card">
+                    <div class="card-header-row">
+                        <h3>Top Institutes (Shift Credits)</h3>
+                    </div>
+                    <div class="bar-chart scrollable-sm">
+                       <div v-for="item in stats.charts.top_shift_institutes" :key="item.member__institute__name" class="bar-row">
+                          <div class="bar-label" :title="item.member__institute__name">{{ item.member__institute__name.substring(0, 20) }}...</div>
+                          <div class="bar-track"><div class="bar-fill orange" :style="{ width: (item.count / 1000) * 100 + '%' }"></div></div>
+                          <div class="bar-val">{{ item.count }}</div>
+                       </div>
+                    </div>
+                 </div>
+              </div>
+
+              <div class="dashboard-col">
+                 <div class="chart-card">
+                    <div class="card-header-row">
+                        <h3>Analysis Pipeline</h3>
+                    </div>
+                    <div class="bar-chart">
+                       <div v-for="item in stats.charts.paper_phases" :key="item.label" class="bar-row">
+                          <div class="bar-label">{{ item.label }}</div>
+                          <div class="bar-track"><div class="bar-fill teal" :style="{ width: (item.count / 100) * 100 + '%' }"></div></div>
+                          <div class="bar-val">{{ item.count }}</div>
+                       </div>
+                    </div>
+                 </div>
+                 <div class="chart-card">
+                    <div class="card-header-row">
+                        <h3>Target Journals</h3>
+                    </div>
+                    <div class="bar-chart">
+                       <div v-for="item in stats.charts.journals" :key="item.target_journal" class="bar-row">
+                          <div class="bar-label">{{ item.target_journal }}</div>
+                          <div class="bar-track"><div class="bar-fill teal" :style="{ width: (item.count / 150) * 100 + '%' }"></div></div>
+                          <div class="bar-val">{{ item.count }}</div>
+                       </div>
+                    </div>
+                 </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="currentApp === 'directory'" class="app-view fade-in">
+            <div class="card-container">
+              <table class="data-table">
+                <thead><tr><th width="60">#</th><th width="100">Contract</th><th>Name</th><th>CERN ID</th><th>Institute</th><th>M&O</th></tr></thead>
+                <tbody>
+                  <tr v-for="(member, index) in members" :key="member.id" @click="openMember(member)">
+                    <td class="row-num">{{ (currentPage - 1) * 20 + index + 1 }}</td>
+                    <td><span :class="['status-badge', member.is_active ? 'active' : 'inactive']">{{ member.is_active ? 'Active' : 'Alumni' }}</span></td>
+                    <td class="fw-bold text-primary">{{ member.last_name }}, {{ member.first_name }}</td>
+                    <td class="mono">{{ member.cern_id }}</td>
+                    <td><div class="inst-name">{{ member.institute_name }}</div></td>
+                    <td><span v-if="member.is_mo_qualified" class="mo-badge">M&O</span><span v-else class="mo-dash">-</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div v-if="currentApp === 'analysis'" class="app-view fade-in">
+            <div class="card-container">
+              <table class="data-table">
+                <thead><tr><th width="140">Ref Code</th><th width="100">Experiment</th><th>Title</th><th width="180">Lifecycle Phase</th><th width="150">Status</th><th width="100">Team</th></tr></thead>
+                <tbody>
+                  <tr v-for="paper in papers" :key="paper.id" @click="openPaper(paper)">
+                    <td class="mono fw-bold text-primary">{{ paper.ref_code }}</td>
+                    <td><span :class="['group-tag', paper.group]">{{ paper.group }}</span></td>
+                    <td class="title-cell">{{ paper.title }}</td>
+                    <td><div class="phase-container"><div class="phase-bar"><div :class="['phase-seg', paper.phase >= 0 ? 'on' : '']"></div><div :class="['phase-seg', paper.phase >= 1 ? 'on' : '']"></div><div :class="['phase-seg', paper.phase >= 2 ? 'on' : '']"></div><div :class="['phase-seg', paper.phase >= 3 ? 'on' : '']"></div></div><span class="phase-label">{{ paper.phase_name }}</span></div></td>
+                    <td><span class="status-text">{{ paper.status_text }}</span></td>
+                    <td class="text-center"><div class="author-badge-wrapper"><span class="author-badge"><svg class="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg> {{ paper.author_count }}</span></div></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div v-if="currentApp === 'telemetry'" class="app-view fade-in">
+
+            <div class="card-container" style="margin-bottom: 24px; padding: 20px; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;">
+              <h3 style="margin-top: 0; color: #1f2937;">Technical Background: BCTDC</h3>
+              <p style="font-size: 0.95rem; color: #4b5563; line-height: 1.6; margin-bottom: 0;">
+                Monitoring **Beam Current Transformer (DC)** measurements via C++ Engine.
+                Initial state is <strong>0.00 p+</strong>. Use the Hardware Controls below the chart to request state transitions.
+              </p>
+            </div>
+
+            <div class="kpi-grid">
+              <div class="kpi-card" :class="{ 'status-stable': beamStatus.includes('STABLE') }">
+                <div class="card-header-row">
+                  <div class="kpi-label">Beam Mode</div>
+                  <div class="tooltip-container" data-tooltip="The current operational state of the LHC.">ⓘ</div>
+                </div>
+                <div class="kpi-val" style="font-size: 1.4rem;">{{ beamStatus }}</div>
+              </div>
+              <div class="kpi-card">
+                <div class="card-header-row">
+                  <div class="kpi-label">Beam Energy</div>
+                  <div class="tooltip-container" data-tooltip="Kinetic energy of circulating protons in GeV.">ⓘ</div>
+                </div>
+                <div class="kpi-val text-blue">{{ beamEnergy }} GeV</div>
+              </div>
+              <div class="kpi-card">
+                <div class="card-header-row">
+                  <div class="kpi-label">Luminosity</div>
+                  <div class="tooltip-container" data-tooltip="Measure of potential collisions per unit area.">ⓘ</div>
+                </div>
+                <div class="kpi-val text-success">2.45 pb⁻¹</div>
+              </div>
+              <div class="kpi-card">
+                <div class="card-header-row">
+                  <div class="kpi-label">Beta Star (β*)</div>
+                  <div class="tooltip-container" data-tooltip="Beam squeeze at the interaction point.">ⓘ</div>
+                </div>
+                <div class="kpi-val text-purple">30.0 cm</div>
+              </div>
+            </div>
+
+            <div class="dashboard-grid">
+              <div class="dashboard-col" style="grid-column: span 3;">
+                <div class="chart-card" style="height: 450px;">
                   <div class="card-header-row">
-                     <h3>Top Institutes (by Headcount)</h3>
-                     <div class="tooltip-container" data-tooltip="Institutes with the highest number of registered members.">ⓘ</div>
+                    <h3>Circulating Beam Intensity (BCTDC)</h3>
+                    <div class="mono text-blue" style="font-size: 1.4rem; font-weight: bold;">
+                      {{ telemetryHistory.length > 0 ? telemetryHistory[telemetryHistory.length - 1].toExponential(4) : '0.0000e+0' }} p+
+                    </div>
                   </div>
-                  <div class="bar-chart scrollable-sm">
-                     <div v-for="item in stats.charts.top_institutes" :key="item.institute__name" class="bar-row">
-                        <div class="bar-label" :title="item.institute__name">{{ item.institute__name.substring(0, 20) }}...</div>
-                        <div class="bar-track"><div class="bar-fill" :style="{ width: (item.count / 1200) * 100 + '%' }"></div></div>
-                        <div class="bar-val">{{ item.count }}</div>
-                     </div>
+                  <div style="height: 350px; margin-top: 20px;">
+                    <Line :data="telemetryChartData" :options="telemetryChartOptions" />
                   </div>
-               </div>
-               <div class="chart-card">
-                  <div class="card-header-row">
-                     <h3>Workforce Composition</h3>
-                     <div class="tooltip-container" data-tooltip="Distribution of personnel by contract (Staff, User, Fellow, PJAS).">ⓘ</div>
-                  </div>
-                  <div class="bar-chart">
-                     <div v-for="item in stats.charts.member_contracts" :key="item.cern_status" class="bar-row">
-                        <div class="bar-label">{{ item.cern_status }}</div>
-                        <div class="bar-track"><div class="bar-fill purple" :style="{ width: (item.count / 3000) * 100 + '%' }"></div></div>
-                        <div class="bar-val">{{ item.count }}</div>
-                     </div>
-                  </div>
-               </div>
+                </div>
+              </div>
             </div>
 
-            <div class="dashboard-col">
-               <div class="chart-card">
-                  <div class="card-header-row">
-                     <h3>Shift Operations (Location)</h3>
-                     <div class="tooltip-container" data-tooltip="Operational coverage split between P5 (Point 5), Meyrin Centre, and Remote ROCs.">ⓘ</div>
-                  </div>
-                  <div class="bar-chart">
-                     <div v-for="item in stats.charts.shift_locations" :key="item.location" class="bar-row">
-                        <div class="bar-label">{{ item.location }}</div>
-                        <div class="bar-track"><div class="bar-fill orange" :style="{ width: (item.count / 1500) * 100 + '%' }"></div></div>
-                        <div class="bar-val">{{ item.count }}</div>
-                     </div>
-                  </div>
-               </div>
-               <div class="chart-card">
-                  <div class="card-header-row">
-                     <h3>Top Institutes (Shift Credits)</h3>
-                     <div class="tooltip-container" data-tooltip="Total shift credits earned by institute (Essential for M&O authorship qualification).">ⓘ</div>
-                  </div>
-                  <div class="bar-chart scrollable-sm">
-                     <div v-for="item in stats.charts.top_shift_institutes" :key="item.member__institute__name" class="bar-row">
-                        <div class="bar-label" :title="item.member__institute__name">{{ item.member__institute__name.substring(0, 20) }}...</div>
-                        <div class="bar-track"><div class="bar-fill orange" :style="{ width: (item.count / 1000) * 100 + '%' }"></div></div>
-                        <div class="bar-val">{{ item.count }}</div>
-                     </div>
-                  </div>
-               </div>
+            <div class="card-container" style="margin: 24px 0; padding: 16px; background: #f8fafc; border: 1px solid #cbd5e1; display: flex; align-items: center; justify-content: space-between; border-radius: 8px;">
+              <div style="display: flex; align-items: center; gap: 15px;">
+                <span style="font-weight: 800; color: #475569; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px;">Hardware Control:</span>
+                <div style="display: flex; gap: 8px;">
+                  <button @click="forceStateChange('RAMP')" style="background: #0053A1; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; font-weight: 600;">Initiate Ramp</button>
+                  <button @click="forceStateChange('STABLE BEAMS')" style="background: #10b981; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; font-weight: 600;">Inject Stable Beam</button>
+                  <button @click="forceStateChange('NO BEAM')" style="background: #ef4444; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; font-weight: 600;">Emergency Dump</button>
+                </div>
+              </div>
+              <div class="bridge-status" style="background: transparent; border: none; color: #64748b; font-size: 0.8rem;">
+                 <span class="pulse-dot"></span> Uplink Bridge Active
+              </div>
             </div>
 
-            <div class="dashboard-col">
-               <div class="chart-card">
-                  <div class="card-header-row">
-                     <h3>Analysis Pipeline</h3>
-                     <div class="tooltip-container" data-tooltip="Volume of analysis at each stage of the CMS publication lifecycle.">ⓘ</div>
-                  </div>
-                  <div class="bar-chart">
-                     <div v-for="item in stats.charts.paper_phases" :key="item.label" class="bar-row">
-                        <div class="bar-label">{{ item.label }}</div>
-                        <div class="bar-track"><div class="bar-fill teal" :style="{ width: (item.count / 100) * 100 + '%' }"></div></div>
-                        <div class="bar-val">{{ item.count }}</div>
-                     </div>
-                  </div>
-               </div>
-               <div class="chart-card">
-                  <div class="card-header-row">
-                     <h3>Target Journals (Active Analysis)</h3>
-                     <div class="tooltip-container" data-tooltip="Target journals for active analysis papers (JHEP, PRL, Nature).">ⓘ</div>
-                  </div>
-                  <div class="bar-chart">
-                     <div v-for="item in stats.charts.journals" :key="item.target_journal" class="bar-row">
-                        <div class="bar-label">{{ item.target_journal }}</div>
-                        <div class="bar-track"><div class="bar-fill teal" :style="{ width: (item.count / 150) * 100 + '%' }"></div></div>
-                        <div class="bar-val">{{ item.count }}</div>
-                     </div>
-                  </div>
-               </div>
+            <div class="card-container" style="margin-top: 10px; padding: 0; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; overflow: hidden; height: 300px; display: flex; flex-direction: column;">
+              <div style="background: #333; color: #fff; padding: 12px 16px; font-size: 0.85rem; font-weight: bold; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;">
+                 <div style="display: flex; align-items: center; gap: 10px;">
+                   <svg style="width: 16px; color: #7c3aed;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                   <span>LHC SYSTEM LOG (BCTDC FEED)</span>
+                 </div>
+                 <span style="color: #10b981; font-size: 0.75rem;">● LIVE CONNECTION</span>
+              </div>
+
+              <div class="audit-list" style="padding: 16px; font-family: 'Courier New', monospace; flex-grow: 1; overflow-y: auto; background: #1a1a1a;">
+                <div v-for="log in auditFeed" :key="log.id" style="margin-bottom: 8px; font-size: 0.9rem; line-height: 1.4;">
+                  <span style="color: #6b7280;">[{{ log.time }}]</span>
+                  <span :style="{ color: log.action.includes('DUMP') ? '#ef4444' : '#b794f4' }" style="font-weight: bold; margin: 0 8px;">
+                    {{ log.action }}:
+                  </span>
+                  <span style="color: #d1d5db;">{{ log.detail }}</span>
+                </div>
+                <div v-if="auditFeed.length === 0" style="color: #4b5563; font-style: italic;">Initializing uplink to BCTDC sensors...</div>
+              </div>
             </div>
+          </div>
 
-         </div>
-      </div>
+          <footer class="pagination-footer" v-if="currentApp !== 'dashboard' && currentApp !== 'telemetry'">
+            <span class="page-count">Page {{ currentPage }} of {{ totalPages }}</span>
+            <div class="page-actions"><button :disabled="!prevUrl" @click="loadPage(prevUrl, 'prev')" class="btn-page">Previous</button><button :disabled="!nextUrl" @click="loadPage(nextUrl, 'next')" class="btn-page">Next</button></div>
+          </footer>
 
-      <div v-if="currentApp === 'directory'" class="app-view fade-in">
-        <div class="card-container">
-          <table class="data-table">
-            <thead><tr><th width="60">#</th><th width="100">Contract</th><th>Name</th><th>CERN ID</th><th>Institute</th><th>M&O</th></tr></thead>
-            <tbody>
-              <tr v-for="(member, index) in members" :key="member.id" @click="openMember(member)">
-                <td class="row-num">{{ (currentPage - 1) * 20 + index + 1 }}</td>
-                <td><span :class="['status-badge', member.is_active ? 'active' : 'inactive']">{{ member.is_active ? 'Active' : 'Alumni' }}</span></td>
-                <td class="fw-bold text-primary">{{ member.last_name }}, {{ member.first_name }}</td>
-                <td class="mono">{{ member.cern_id }}</td>
-                <td><div class="inst-name">{{ member.institute_name }}</div></td>
-                <td><span v-if="member.is_mo_qualified" class="mo-badge">M&O</span><span v-else class="mo-dash">-</span></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
+        </main>
 
-      <div v-if="currentApp === 'analysis'" class="app-view fade-in">
-        <div class="card-container">
-          <table class="data-table">
-            <thead><tr><th width="140">Ref Code</th><th width="100">Experiment</th><th>Title</th><th width="180">Lifecycle Phase</th><th width="150">Status</th><th width="100">Team</th></tr></thead>
-            <tbody>
-              <tr v-for="paper in papers" :key="paper.id" @click="openPaper(paper)">
-                <td class="mono fw-bold text-primary">{{ paper.ref_code }}</td>
-                <td><span :class="['group-tag', paper.group]">{{ paper.group }}</span></td>
-                <td class="title-cell">{{ paper.title }}</td>
-                <td><div class="phase-container"><div class="phase-bar"><div :class="['phase-seg', paper.phase >= 0 ? 'on' : '']"></div><div :class="['phase-seg', paper.phase >= 1 ? 'on' : '']"></div><div :class="['phase-seg', paper.phase >= 2 ? 'on' : '']"></div><div :class="['phase-seg', paper.phase >= 3 ? 'on' : '']"></div></div><span class="phase-label">{{ paper.phase_name }}</span></div></td>
-                <td><span class="status-text">{{ paper.status_text }}</span></td>
-                <td class="text-center"><div class="author-badge-wrapper"><span class="author-badge"><svg class="icon-sm" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg> {{ paper.author_count }}</span></div></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
+        <div v-if="selectedMember" class="modal-overlay" @click.self="closeModals">
+          <div class="modal-content split-modal">
+            <button class="absolute-close-btn" @click="closeModals"><svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+            <div class="modal-body-split">
+               <div class="left-panel">
+                <div class="tabs-header">
+                  <button :class="['tab-btn', { active: memberTab === 'profile' }]" @click="memberTab = 'profile'">Profile</button>
+                  <button :class="['tab-btn', { active: memberTab === 'history' }]" @click="memberTab = 'history'">History</button>
+                </div>
 
-      <footer class="pagination-footer" v-if="currentApp !== 'dashboard'">
-        <span class="page-count">Page {{ currentPage }} of {{ totalPages }}</span>
-        <div class="page-actions"><button :disabled="!prevUrl" @click="loadPage(prevUrl, 'prev')" class="btn-page">Previous</button><button :disabled="!nextUrl" @click="loadPage(nextUrl, 'next')" class="btn-page">Next</button></div>
-      </footer>
-
-    </main>
-
-    <div v-if="selectedMember" class="modal-overlay" @click.self="closeModals">
-      <div class="modal-content split-modal">
-        <button class="absolute-close-btn" @click="closeModals"><svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path></svg></button>
-
-        <div class="modal-body-split">
-
-           <div class="left-panel">
-
-             <div class="tabs-header">
-                <button :class="['tab-btn', { active: memberTab === 'profile' }]" @click="memberTab = 'profile'">Profile</button>
-                <button :class="['tab-btn', { active: memberTab === 'history' }]" @click="memberTab = 'history'">History</button>
-             </div>
-
-             <div v-if="memberTab === 'profile'" class="tab-content fade-in">
-
-                 <div class="profile-header">
+                <div v-if="memberTab === 'profile'" class="tab-content fade-in">
+                  <div class="profile-header">
                     <div v-if="!isEditing">
                       <h2>{{ selectedMember.last_name }}, {{ selectedMember.first_name }}</h2>
                       <div class="profile-meta-row">
-                         <span class="profile-sub">{{ selectedMember.cern_id }}</span>
-                         <span class="sep">|</span>
-                         <span class="profile-sub">{{ selectedMember.institute_name }}</span>
+                        <span class="profile-sub">{{ selectedMember.cern_id }}</span>
+                        <span class="sep">|</span>
+                        <span class="profile-sub">{{ selectedMember.institute_name }}</span>
                       </div>
                       <div class="country-badge">{{ selectedMember.institute_country }}</div>
                     </div>
-
                     <div v-else class="edit-mode-group">
-                      <label class="edit-label">Name</label>
+                      <label class="edit-label">Full Name</label>
                       <div class="name-inputs">
                         <input v-model="editForm.first_name" class="form-input" placeholder="First Name" />
                         <input v-model="editForm.last_name" class="form-input" placeholder="Last Name" />
                       </div>
-                      <div class="read-only-notice">
-                        <svg class="lock-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
-                        <span>ID: {{ selectedMember.cern_id }} &bull; {{ selectedMember.institute_name }}</span>
-                      </div>
                     </div>
-                 </div>
+                  </div>
 
-                 <div class="divider"></div>
+                  <div class="divider"></div>
 
-                 <div class="vertical-meta">
-                   <div class="field-group">
-                     <label>Email</label>
-                     <div v-if="!isEditing" class="val-text">{{ selectedMember.email }}</div>
-                     <input v-else v-model="editForm.email" class="form-input" />
-                   </div>
-                   <div class="field-group">
-                     <label>Contract</label>
-                     <div v-if="!isEditing" class="val-text">{{ selectedMember.cern_status }}</div>
-                     <select v-else v-model="editForm.cern_status" class="form-select">
-                       <option value="USER">USER</option>
-                       <option value="STAFF">STAFF</option>
-                       <option value="FELLOW">FELLOW</option>
-                       <option value="DOCTORAL STUDENT">DOCTORAL STUDENT</option>
-                       <option value="PJAS">PJAS</option>
-                       <option value="TECHNICAL STUDENT">TECHNICAL STUDENT</option>
-                     </select>
-                   </div>
-                   <div class="field-group">
-                     <label>M&O Status</label>
-                     <div v-if="!isEditing">
-                       <div v-if="selectedMember.is_mo_qualified" class="val-text text-success"><svg class="icon-inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg> Qualified</div>
-                       <div v-else class="val-text text-muted">Not Qualified</div>
-                     </div>
-                     <label v-else class="toggle-switch">
-                       <input type="checkbox" v-model="editForm.is_mo_qualified">
-                       <span class="toggle-slider"></span>
-                       <span class="toggle-label">{{ editForm.is_mo_qualified ? 'QUALIFIED' : 'NOT QUALIFIED' }}</span>
-                     </label>
-                   </div>
-                 </div>
+                  <div class="vertical-meta">
+                    <div class="field-group">
+                      <label>Email Address</label>
+                      <div v-if="!isEditing" class="val-text">{{ selectedMember.email }}</div>
+                      <input v-else v-model="editForm.email" class="form-input" />
+                    </div>
 
-                 <div class="section-block">
-                   <h3>Technical Qualifications</h3>
-                   <div v-if="selectedMember.qualifications && selectedMember.qualifications.length > 0" class="qualifications-list">
-                     <div v-for="qual in selectedMember.qualifications" :key="qual.id" class="qual-item">
+                    <div class="field-group">
+                      <label>Contract Status</label>
+                      <div v-if="!isEditing" class="val-text">{{ selectedMember.cern_status }}</div>
+                      <select v-else v-model="editForm.cern_status" class="form-select">
+                        <option value="USER">USER</option>
+                        <option value="STAFF">STAFF</option>
+                        <option value="FELLOW">FELLOW</option>
+                        <option value="PJAS">PJAS</option>
+                        <option value="DOCTORAL STUDENT">DOCTORAL STUDENT</option>
+                      </select>
+                    </div>
+
+                    <div class="field-group">
+                      <label>M&O Status</label>
+                      <div v-if="!isEditing">
+                        <div v-if="selectedMember.is_mo_qualified" class="text-success fw-bold">✓ Qualified for M&O</div>
+                        <div v-else class="text-muted">Not Qualified</div>
+                      </div>
+                      <select v-else v-model="editForm.is_mo_qualified" class="form-select">
+                        <option :value="true">QUALIFIED (PhD/M&O)</option>
+                        <option :value="false">NOT QUALIFIED</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div class="section-block">
+                    <h3>Technical Qualifications</h3>
+                    <div v-if="selectedMember.qualifications && selectedMember.qualifications.length > 0" class="qualifications-list">
+                      <div v-for="qual in selectedMember.qualifications" :key="qual.id" class="qual-item">
                         <div class="qual-name">{{ qual.name }}</div>
                         <div class="qual-date">Earned {{ qual.date_earned }}</div>
-                     </div>
-                   </div>
-                   <div v-else class="empty-state">No qualifications recorded.</div>
-                 </div>
+                      </div>
+                    </div>
+                    <div v-else class="empty-state">No qualifications recorded.</div>
+                  </div>
 
-                 <div class="panel-actions" v-if="isLoggedIn">
-                   <button v-if="!isEditing" @click="isEditing = true" class="btn-primary full-width">Edit Profile</button>
-                   <div v-else class="edit-actions">
-                     <button @click="saveMember" class="btn-primary full-width">Save Changes</button>
-                     <button @click="isEditing = false" class="btn-secondary full-width">Cancel</button>
-                   </div>
-                 </div>
-             </div>
+                  <div class="panel-actions">
+                    <button v-if="isLoggedIn && !isEditing" @click="isEditing = true" class="btn-primary full-width">Edit Profile</button>
+                    <button v-else-if="!isLoggedIn" @click="showLoginModal = true" class="btn-secondary full-width">Login to Edit Profile</button>
+                    <div v-else class="edit-actions">
+                      <button @click="saveMember" class="btn-primary full-width">Save Changes</button>
+                      <button @click="isEditing = false" class="btn-secondary full-width">Cancel</button>
+                    </div>
+                  </div>
+                </div>
 
-             <div v-else class="tab-content fade-in">
-                <div class="audit-list">
-                   <div v-for="log in selectedMember.auditLogs" :key="log.id" class="audit-item">
+                <div v-else class="tab-content fade-in">
+                  <div class="audit-list">
+                    <div v-for="log in selectedMember.auditLogs" :key="log.id" class="audit-item">
                       <div class="audit-date">{{ log.date }}</div>
                       <div class="audit-main">
-                         <span class="audit-user">{{ log.user }}</span>
-                         <span class="audit-action">{{ log.action }}</span>
+                        <span class="audit-user">{{ log.user }}</span>
+                        <span class="audit-action">{{ log.action }}</span>
                       </div>
                       <div class="audit-detail">{{ log.detail }}</div>
-                   </div>
+                    </div>
+                  </div>
                 </div>
-             </div>
-
-           </div>
-
-           <div class="right-panel">
-             <div class="calendar-header">
-               <button @click="changeMonth(-1)" class="cal-btn">&lsaquo;</button>
-               <span class="cal-title">{{ calendarHeader }}</span>
-               <button @click="changeMonth(1)" class="cal-btn">&rsaquo;</button>
-             </div>
-
-             <div class="calendar-grid-header">
-               <span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span>
-             </div>
-
-             <div class="calendar-grid">
-               <div v-for="(day, idx) in calendarGrid" :key="idx" class="cal-day" @click="openDayManager(day)">
-                 <span v-if="day" class="day-num">{{ day }}</span>
-                 <div v-if="day" class="day-shifts">
-                   <div v-for="shift in getShiftsForDay(day)" :key="shift.id" :class="['shift-bar', shift.type.toLowerCase()]" :title="`${shift.type} at ${shift.location}`"></div>
+              </div>
+               <div class="right-panel">
+                 <div class="calendar-header"><button @click="changeMonth(-1)" class="cal-btn">&lsaquo;</button><span class="cal-title">{{ calendarHeader }}</span><button @click="changeMonth(1)" class="cal-btn">&rsaquo;</button></div>
+                 <div class="calendar-grid-header"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+                 <div class="calendar-grid">
+                   <div v-for="(day, idx) in calendarGrid" :key="idx" class="cal-day" @click="openDayManager(day)">
+                     <span v-if="day" class="day-num">{{ day }}</span>
+                     <div v-if="day" class="day-shifts">
+                       <div v-for="shift in getShiftsForDay(day)" :key="shift.id" :class="['shift-bar', shift.type.toLowerCase()]" :title="`${shift.type} at ${shift.location}`"></div>
+                     </div>
+                   </div>
                  </div>
                </div>
-             </div>
-
-             <div class="cal-legend">
-                <div class="legend-item"><span class="dot morning"></span> Morning</div>
-                <div class="legend-item"><span class="dot evening"></span> Evening</div>
-                <div class="legend-item"><span class="dot night"></span> Night</div>
-             </div>
-           </div>
-
-        </div>
-      </div>
-    </div>
-
-    <div v-if="showDayModal" class="modal-overlay">
-      <div class="login-card">
-        <div class="login-header"><h3>Manage Shifts</h3><p>{{ selectedDayData.dayDisplay }}</p></div>
-
-        <div v-if="selectedDayData.shifts.length > 0" class="existing-shifts-list">
-           <div v-for="shift in selectedDayData.shifts" :key="shift.id" class="shift-row-item">
-              <div class="shift-info"><span :class="['dot', shift.type.toLowerCase()]"></span> <strong>{{ shift.type }}</strong> &mdash; {{ shift.location }}</div>
-              <button @click="deleteShift(shift.id)" class="btn-icon-delete"><svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
-           </div>
-        </div>
-        <div v-else class="empty-state-small">No shifts assigned for this day.</div>
-
-        <div class="divider-line"></div>
-
-        <div class="login-form">
-          <div class="input-group"><label>Add New Shift</label><select v-model="newShift.type"><option value="MORNING">Morning (08:00 - 16:00)</option><option value="EVENING">Evening (16:00 - 24:00)</option><option value="NIGHT">Night (00:00 - 08:00)</option></select></div>
-          <div class="input-group">
-             <select v-model="newShift.location">
-                <option value="P5 Control Room (Cessy)">P5 Control Room (Cessy)</option>
-                <option value="CMS Centre (Meyrin)">CMS Centre (Meyrin)</option>
-                <option value="Fermilab ROC (Remote)">Fermilab ROC (Remote)</option>
-                <option value="DESY ROC (Remote)">DESY ROC (Remote)</option>
-                <option value="Site 40 Lab">Site 40 Lab</option>
-                <option value="Remote (Zoom)">Remote (Zoom)</option>
-             </select>
-          </div>
-        </div>
-
-        <div v-if="shiftError" class="login-alert warn"><div class="alert-content">{{ shiftError }}</div></div>
-
-        <div class="login-actions"><button @click="submitShift" class="btn-primary full-width">Add Shift</button><button @click="showDayModal = false" class="btn-text full-width">Close</button></div>
-      </div>
-    </div>
-
-    <div v-if="selectedPaper" class="modal-overlay" @click.self="closeModals">
-       <div class="modal-content large-modal">
-          <div class="modal-header">
-             <div class="modal-title-group"><div class="ref-badge">{{ selectedPaper.ref_code }}</div><h2>{{ selectedPaper.title }}</h2></div>
-             <button class="close-btn" @click="closeModals"><svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path></svg></button>
-          </div>
-          <div class="modal-body paper-layout">
-            <div class="paper-meta-grid">
-               <div class="meta-card"><label>Experiment</label><span :class="['group-tag', selectedPaper.group]">{{ selectedPaper.group }}</span></div>
-               <div class="meta-card"><label>Started</label><span class="meta-value">{{ selectedPaper.creation_date }}</span></div>
-               <div class="meta-card"><label>Journal</label><span class="meta-value">{{ selectedPaper.target_journal || 'N/A' }}</span></div>
-               <div class="meta-card"><label>Status</label><span class="status-text bold">{{ selectedPaper.status_text }}</span></div>
             </div>
-            <div class="paper-section"><h3>Lifecycle</h3><div class="lifecycle-track"><div :class="['track-step', selectedPaper.phase >= 0 ? 'active' : '']"><div class="step-dot"></div><div class="step-label">Draft / Idea</div></div><div class="track-line"></div><div :class="['track-step', selectedPaper.phase >= 1 ? 'active' : '']"><div class="step-dot"></div><div class="step-label">Analysis</div></div><div class="track-line"></div><div :class="['track-step', selectedPaper.phase >= 2 ? 'active' : '']"><div class="step-dot"></div><div class="step-label">Review</div></div><div class="track-line"></div><div :class="['track-step', selectedPaper.phase >= 3 ? 'active' : '']"><div class="step-dot"></div><div class="step-label">Published</div></div></div></div>
-            <div class="paper-section">
-               <div class="section-header"><h3>Author Team</h3><span class="count-pill">{{ selectedPaper.author_count }} Members</span></div>
-               <div class="authors-grid-clean">
-                  <div v-for="author in selectedPaper.authors" :key="author.id" class="author-tile">
-                     <div class="author-avatar-sm">{{ author.first_name[0] }}{{ author.last_name[0] }}</div>
-                     <div class="author-details"><div class="name">{{ author.last_name }}, {{ author.first_name }}</div><div class="inst">{{ author.institute_name }}</div></div>
+          </div>
+        </div>
+
+        <div v-if="showLoginModal" class="modal-overlay">
+          <div class="login-card fade-in">
+            <div class="login-header">
+              <h3>Admin Access</h3>
+              <p>Please sign in to continue</p>
+            </div>
+
+            <div class="login-alert">
+              <svg class="info-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+              <div class="alert-content">User: <strong>cern</strong> &bull; Pass: <strong>cms123</strong></div>
+            </div>
+
+            <div class="login-form">
+              <div class="input-group">
+                <label>Username</label>
+                <input v-model="loginForm.username" placeholder="Enter username" />
+              </div>
+              <div class="input-group">
+                <label>Password</label>
+                <input v-model="loginForm.password" type="password" placeholder="Enter password" @keyup.enter="login" />
+              </div>
+            </div>
+            <div class="login-actions">
+              <button @click="login" class="btn-primary full-width">Sign In</button>
+              <button @click="showLoginModal = false" class="btn-text full-width">Cancel</button>
+            </div>
+          </div>
+        </div>
+
+          <div v-if="selectedPaper" class="modal-overlay" @click.self="closeModals">
+            <div class="modal-content large-modal">
+              <div class="modal-header">
+                <div class="modal-title-group">
+                  <div class="ref-badge">{{ selectedPaper.ref_code }}</div>
+                  <h2>{{ selectedPaper.title }}</h2>
+                </div>
+                <button class="close-btn" @click="closeModals">
+                  <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+              </div>
+              <div class="modal-body paper-layout">
+                <div class="paper-meta-grid">
+                  <div class="meta-card">
+                    <label>Experiment</label>
+                    <span :class="['group-tag', selectedPaper.group]">{{ selectedPaper.group }}</span>
                   </div>
-               </div>
+                  <div class="meta-card"><label>Started</label><span class="meta-value">{{ selectedPaper.creation_date }}</span></div>
+                  <div class="meta-card"><label>Journal</label><span class="meta-value">{{ selectedPaper.target_journal || 'N/A' }}</span></div>
+                  <div class="meta-card"><label>Status</label><span class="status-text bold">{{ selectedPaper.status_text }}</span></div>
+                </div>
+
+                <div class="paper-section">
+                  <h3>Lifecycle</h3>
+                  <div class="lifecycle-track">
+                    <div :class="['track-step', selectedPaper.phase >= 0 ? 'active' : '']"><div class="step-dot"></div><div class="step-label">Draft / Idea</div></div>
+                    <div class="track-line"></div>
+                    <div :class="['track-step', selectedPaper.phase >= 1 ? 'active' : '']"><div class="step-dot"></div><div class="step-label">Analysis</div></div>
+                    <div class="track-line"></div>
+                    <div :class="['track-step', selectedPaper.phase >= 2 ? 'active' : '']"><div class="step-dot"></div><div class="step-label">Review</div></div>
+                    <div class="track-line"></div>
+                    <div :class="['track-step', selectedPaper.phase >= 3 ? 'active' : '']"><div class="step-dot"></div><div class="step-label">Published</div></div>
+                  </div>
+                </div>
+
+                <div class="paper-section">
+                  <div class="section-header">
+                    <h3>Author Team</h3>
+                    <span class="count-pill">{{ selectedPaper.author_count }} Members</span>
+                  </div>
+                  <div class="authors-grid-clean">
+                    <div v-for="author in selectedPaper.authors" :key="author.id" class="author-tile">
+                      <div class="author-avatar-sm">{{ author.first_name[0] }}{{ author.last_name[0] }}</div>
+                      <div class="author-details">
+                        <div class="name">{{ author.last_name }}, {{ author.first_name }}</div>
+                        <div class="inst">{{ author.institute_name }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-       </div>
-    </div>
+              <div v-if="showDayModal" class="modal-overlay" style="z-index: 200;" @click.self="showDayModal = false">
+            <div class="login-card fade-in">
+              <div class="login-header">
+                <h3>Manage Shifts</h3>
+                <p>{{ selectedDayData.dayDisplay }}</p>
+              </div>
 
-    <div v-if="showLoginModal" class="modal-overlay">
-      <div class="login-card">
-        <div class="login-header"><h3>Admin Access</h3><p>Please sign in to continue</p></div>
-        <div class="login-alert"><svg class="info-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg><div class="alert-content">User: <strong>cern</strong> &bull; Pass: <strong>cms123</strong></div></div>
-        <div class="login-form">
-          <div class="input-group"><label>Username</label><input v-model="loginForm.username" placeholder="Enter username" /></div>
-          <div class="input-group"><label>Password</label><input v-model="loginForm.password" type="password" placeholder="Enter password" /></div>
+              <div v-if="selectedDayData.shifts && selectedDayData.shifts.length > 0" class="existing-shifts-list">
+                <div v-for="shift in selectedDayData.shifts" :key="shift.id" class="shift-row-item">
+                  <div class="shift-info">
+                    <span :class="['dot', shift.type.toLowerCase()]"></span>
+                    <strong>{{ shift.type }}</strong> — {{ shift.location }}
+                  </div>
+                  <button @click="deleteShift(shift.id)" class="btn-icon-delete">
+                    <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                  </button>
+                </div>
+              </div>
+              <div v-else class="empty-state-small">No shifts assigned for this day.</div>
+
+              <div class="divider-line"></div>
+
+              <div class="login-form">
+                <div class="input-group">
+                  <label>Shift Type</label>
+                  <select v-model="newShift.type" class="form-select">
+                    <option value="MORNING">Morning (08:00 - 16:00)</option>
+                    <option value="EVENING">Evening (16:00 - 24:00)</option>
+                    <option value="NIGHT">Night (00:00 - 08:00)</option>
+                  </select>
+                </div>
+                <div class="input-group">
+                  <label>Location</label>
+                  <select v-model="newShift.location" class="form-select">
+                    <option value="P5 Control Room (Cessy)">P5 Control Room (Cessy)</option>
+                    <option value="CMS Centre (Meyrin)">CMS Centre (Meyrin)</option>
+                    <option value="Fermilab ROC (Remote)">Fermilab ROC (Remote)</option>
+                    <option value="DESY ROC (Remote)">DESY ROC (Remote)</option>
+                    <option value="Site 40 Lab">Site 40 Lab</option>
+                    <option value="Remote (Zoom)">Remote (Zoom)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div v-if="shiftError" class="login-alert warn">
+                <div class="alert-content">{{ shiftError }}</div>
+              </div>
+
+              <div class="login-actions">
+                <button @click="submitShift" class="btn-primary full-width">Add Shift</button>
+                <button @click="showDayModal = false" class="btn-text full-width">Close</button>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="login-actions"><button @click="login" class="btn-primary full-width">Sign In</button><button @click="showLoginModal = false" class="btn-text full-width">Cancel</button></div>
-      </div>
-    </div>
-
-  </div>
-</template>
+    </template>
 
 <style>body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f3f4f6; }</style>
 
@@ -944,6 +1157,7 @@ onMounted(() => {
   background: #f9fafb;
 }
 .tooltip-container:hover { background: #f3f4f6; color: #4b5563; border-color: #d1d5db; }
+
 .tooltip-container:hover::after {
   content: attr(data-tooltip);
   position: absolute;
@@ -952,15 +1166,20 @@ onMounted(() => {
   transform: translateX(-50%);
   background: #1f2937;
   color: white;
-  padding: 8px 12px;
+  padding: 10px 14px; /* Increased padding for readability */
   border-radius: 6px;
   font-size: 0.75rem;
-  white-space: nowrap;
-  z-index: 100;
-  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+  /* UPDATED: Allow text wrapping and set a fixed width */
+  white-space: normal;
+  width: 220px;
+  text-align: left;
+  line-height: 1.4;
+  z-index: 1000; /* Increased z-index to stay above charts */
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
   pointer-events: none;
   font-weight: 500;
 }
+
 .tooltip-container:hover::before {
   content: "";
   position: absolute;
@@ -970,7 +1189,66 @@ onMounted(() => {
   border-width: 5px;
   border-style: solid;
   border-color: #1f2937 transparent transparent transparent;
-  z-index: 100;
+  z-index: 1000;
+}
+
+/* FIX: Prevent clipping for the last KPI card (Beta Star) */
+.kpi-card:last-child .tooltip-container:hover::after {
+  left: auto !important;
+  right: 0 !important;
+  transform: translateX(0) !important;
+}
+
+.kpi-card:last-child .tooltip-container:hover::before {
+  left: auto !important;
+  right: 4px !important;
+  transform: translateX(0) !important;
+}
+
+/* 1. Reset Member Status Badges (Static & Professional) */
+.status-badge {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+}
+
+.status-badge.active {
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #d1fae5;
+}
+
+.bridge-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #10b981;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+/* 3. The ONLY pulsing element in the app */
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  background-color: #10b981;
+  border-radius: 50%;
+  display: inline-block;
+  animation: pulse-green 2s infinite;
+}
+
+@keyframes pulse-green {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+  70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
 }
 
 .legacy-mode { font-family: "Times New Roman", Times, serif !important; background: #c0c0c0; color: black; }
@@ -1089,6 +1367,31 @@ onMounted(() => {
   border: 1px solid black !important;
   background: white !important;
   border-radius: 0 !important;
+  border-left: 1px solid black !important;
+}
+
+.audit-item {
+  padding: 12px;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  border-left: 3px solid #0053A1;
+  margin-bottom: 12px;
+}
+
+.audit-action {
+  color: #0053A1;
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.app-view[v-if*="telemetry"] .audit-action {
+  color: #7c3aed;
+  background: #f3e8ff;
+  padding: 2px 8px;
+  border-radius: 4px;
 }
 
 /* LEGACY MODE OVERRIDES FOR NEW COLORS */
@@ -1271,11 +1574,9 @@ onMounted(() => {
 
 /* AUDIT LOG */
 .audit-list { display: flex; flex-direction: column; gap: 12px; }
-.audit-item { padding: 12px; background: white; border: 1px solid #e5e7eb; border-radius: 6px; border-left: 3px solid #0053A1; }
 .audit-date { font-size: 0.7rem; color: #9ca3af; margin-bottom: 4px; }
 .audit-main { display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 4px; }
 .audit-user { font-weight: 600; color: #374151; }
-.audit-action { color: #0053A1; font-weight: 500; }
 .audit-detail { font-size: 0.8rem; color: #4b5563; font-style: italic; }
 
 /* QUALIFICATIONS CARD LIST */
@@ -1361,7 +1662,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   cursor: pointer;
-  gap: 20px;
+  gap: 12px;
   margin-top: 8px;
 }
 .toggle-switch input {
@@ -1400,8 +1701,20 @@ onMounted(() => {
   font-size: 0.9rem;
   font-weight: 500;
   color: #374151;
-  margin-left: 12px;
+  margin-left: 0;
+  line-height: 1;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+}
+
+.status-stable {
+  border-left: 5px solid #10b981 !important;
+  background: #f0fdf4 !important;
+}
+.status-stable .kpi-val {
+  color: #047857;
+  font-weight: 900;
 }
 
 /* FIXED: PAPER MODAL LAYOUT */

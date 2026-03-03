@@ -12,26 +12,20 @@ class DashboardIntegrationTests(APITestCase):
     """
 
     def setUp(self):
-        # 1. Setup Base Data
         self.cern = Institute.objects.create(name="CERN", country="Switzerland", code="CERN")
         self.mit = Institute.objects.create(name="MIT", country="USA", code="MIT")
 
-        # 2. Create a specific mix of workforce
-        # 1 Staff (Qualified)
         Member.objects.create(
             first_name="Admin", last_name="User", cern_id="001",
             institute=self.cern, cern_status="STAFF", is_mo_qualified=True
         )
-        # 2 PJAS (Qualified)
         Member.objects.create(first_name="Eng", last_name="One", cern_id="002", institute=self.mit, cern_status="PJAS",
                               is_mo_qualified=True)
         Member.objects.create(first_name="Eng", last_name="Two", cern_id="003", institute=self.mit, cern_status="PJAS",
                               is_mo_qualified=True)
-        # 1 Student (Not Qualified)
         Member.objects.create(first_name="Student", last_name="New", cern_id="004", institute=self.mit,
                               cern_status="DOCTORAL STUDENT", is_mo_qualified=False)
 
-        # 3. Create Analyses
         Analysis.objects.create(title="Higgs 1", ref_code="H1", group="HIG", phase=3)  # Published
         Analysis.objects.create(title="Susy 1", ref_code="S1", group="SUS", phase=1)  # Active
 
@@ -42,14 +36,11 @@ class DashboardIntegrationTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         data = response.data
 
-        # Check KPI: Total Members
         self.assertEqual(data['metrics']['total_members'], 4)
 
-        # Check KPI: M&O Qualified (3 out of 4 members are qualified)
         self.assertEqual(data['metrics']['mo_qualified_count'], 3)
         self.assertEqual(data['metrics']['mo_percent'], 75.0)  # (3/4)*100
 
-        # Check KPI: Total Papers
         self.assertEqual(data['metrics']['total_papers'], 2)
 
     def test_chart_data_integrity(self):
@@ -57,12 +48,10 @@ class DashboardIntegrationTests(APITestCase):
         response = self.client.get('/api/stats/')
         charts = response.data['charts']
 
-        # Check Workforce Composition Chart
         statuses = [item['cern_status'] for item in charts['member_contracts']]
         self.assertIn("PJAS", statuses)
         self.assertIn("STAFF", statuses)
 
-        # Verify count for PJAS is 2
         pjas_data = next(item for item in charts['member_contracts'] if item['cern_status'] == "PJAS")
         self.assertEqual(pjas_data['count'], 2)
 
@@ -73,7 +62,6 @@ class ShiftManagementTests(APITestCase):
     """
 
     def setUp(self):
-        # --- FIX: Create a user and log them in ---
         self.user = User.objects.create_user(username='testadmin', password='testpassword')
         self.client.force_authenticate(user=self.user)
 
@@ -120,7 +108,6 @@ class AnalysisTrackerTests(APITestCase):
         Analysis.objects.create(title="C", ref_code="C1", group="CMS", target_journal="Phys. Rev. Lett.", phase=2)
 
     def test_filter_by_target_journal(self):
-        """Ensure we can filter by the new journal field"""
         url = '/api/analyses/?search=Nature'
         response = self.client.get(url)
 
@@ -129,7 +116,7 @@ class AnalysisTrackerTests(APITestCase):
 
     def test_phase_filtering(self):
         """Test filtering by lifecycle phase (e.g., Published vs Draft)"""
-        url = '/api/analyses/?phase=3'  # Published
+        url = '/api/analyses/?phase=3'
         response = self.client.get(url)
 
         self.assertEqual(len(response.data['results']), 1)
