@@ -23,9 +23,7 @@ It provides a comprehensive solution for managing 5,000+ personnel records, M&O 
 The system features a live telemetry pipeline that mirrors the data flow in a physical experiment environment:
 
 - **C++ Beam Simulator:** A dedicated engine simulating Beam Current Transformer (BCTDC) signals, modeling proton intensity and energy ramps.
-
 - **Java Spring Boot Service:** A high-throughput telemetry harvester that ingests sensor data, manages time-series persistence, and provides a RESTful interface for historical trend analysis.
-
 - **Uplink Observer:** A Vue.js 3 frontend that visualizes live data via Chart.js and allows for operator-led state transitions (Ramp, Stable Beams, and Emergency Dump).
 
 
@@ -33,25 +31,17 @@ The system features a live telemetry pipeline that mirrors the data flow in a ph
 ## Key Features
 
 - **LHC Live Telemetry:** Real-time monitoring of circulating beam intensity with interactive hardware control capabilities.
-
 - **Incubator Dashboard:** Analytical view of workforce composition, shift distribution, and publication throughput.
-
 - **Member Directory:** Searchable directory with performance-optimized filtering by institute, country, and contract type.
-
 - **Analysis Lifecycle Tracker:** Tracking of scientific papers through the four-stage CMS internal approval process.
-
 - **Shift Management:** Interactive calendar system for scheduling and auditing control room shifts across global sites.
-    
 - **Legacy Mode:** A toggleable interface theme inspired by vintage X11 and Java Swing applications used in early CERN computing environments.
 
 ## Tech Stack
 
 - **Languages:** C++ 17, Java 17, Python 3.12, JavaScript (ES6+).
-
 - **Frameworks:** Vue.js 3 (Composition API), Spring Boot 3.4, Django 5 (REST Framework).
-
 - **Infrastructure:** Docker, Docker Compose, Nginx (API Gateway).
-
 - **Deployment:** AWS EC2, Route 53, SSL/TLS via Let's Encrypt.
 
 ## Architecture
@@ -61,13 +51,9 @@ The portal utilizes a containerized microservices architecture to maintain servi
 Services communicate over an internal Docker bridge network; the C++ engine pushes telemetry to the Java harvester via high-frequency REST calls, while the Django management API coordinates machine state overrides:
 
 1. **Nginx Gateway:** Operates as a Reverse Proxy and API Gateway, handling SSL termination and routing traffic to the internal Docker network.
-
 2. **Telemetry Service (Java):** Optimized for high-frequency data ingestion and historical retrieval.
-
 3. **Management API (Python):** Handles relational data, user authentication (JWT), and personnel records.
-
 4. **Hardware Simulator (C++):** An independent service simulating sensor signals via low-level logic.
-
 5. **Database (PostgreSQL):** Centralized persistence for both time-series telemetry and administrative records.
 
 ## Local Installation
@@ -87,9 +73,7 @@ chmod +x deploy.sh
 ```
 
 **Access Locally:** http://localhost
-
 **Django Admin:** http://localhost/admin
-
 **Java API:** http://localhost:8080/api/v1/telemetry/history
 
 ## Testing
@@ -120,9 +104,7 @@ cd frontend && npm run test:unit
 This project is deployed on an AWS EC2 t3.micro instance.
 
 - Infrastructure: AWS EC2 t3.micro.
-
 - Security: HTTPS enforced via Certbot and Nginx.
-
 - Persistence: Volume-mapped PostgreSQL data to ensure durability.
 
 ## Gallery
