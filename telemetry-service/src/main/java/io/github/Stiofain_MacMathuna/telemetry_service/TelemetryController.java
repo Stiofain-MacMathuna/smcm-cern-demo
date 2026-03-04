@@ -19,28 +19,24 @@ public class TelemetryController {
     @Autowired
     private TelemetryRepository repository;
 
-    // Multithreading: Dedicated pool for processing sensor data
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
 
     @PostMapping("/ingest")
     public String ingestData(@RequestBody TelemetryEvent event) {
-        // Set a timestamp if one wasn't provided in the JSON
         if (event.getTimestamp() == null) {
             event.setTimestamp(LocalDateTime.now());
         }
 
         executor.submit(() -> {
-            // 1. Simulate complex analysis (CERN Post-Mortem style)
             System.out.println("[POST-MORTEM] Analyzing " + event.getEventType() +
                     " from Sensor: " + event.getSensorId());
 
             try {
-                Thread.sleep(1500); // Simulating heavy analysis
+                Thread.sleep(1500);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
 
-            // 2. Persist the result to PostgreSQL
             repository.save(event);
 
             System.out.println("[ARCHIVE] Event from " + event.getSensorId() + " successfully persisted to DB.");
@@ -51,9 +47,12 @@ public class TelemetryController {
 
     @GetMapping("/history")
     public List<TelemetryEvent> getHistory() {
-        // Returns all events, newest first
-        return repository.findAll(org.springframework.data.domain.Sort.by(
-                org.springframework.data.domain.Sort.Direction.DESC, "timestamp"));
+        /**
+         * FIX: Switched from findAll() to findTop100ByOrderByTimestampDesc()
+         * This prevents the java.lang.OutOfMemoryError by capping the data
+         * returned to the frontend.
+         */
+        return repository.findTop100ByOrderByTimestampDesc();
     }
 
     @GetMapping("/sensor/{sensorId}")

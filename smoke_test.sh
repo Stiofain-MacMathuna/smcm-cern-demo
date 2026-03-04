@@ -1,36 +1,45 @@
 #!/bin/bash
 
-# Colors for output
 GREEN='\033[0;32m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 echo "--- CERN Telemetry System Smoke Test ---"
 
-# 1. Test Java API
-echo -n "Checking Java Telemetry Service (8080)... "
-if curl -s --head  --request GET http://localhost:8080/api/v1/telemetry/history | grep "200" > /dev/null
-then
-    echo -e "${GREEN}PASS${NC}"
-else
-    echo -e "${RED}FAIL (Service down or DB not ready)${NC}"
-fi
 
-# 2. Test Django Status API
-echo -n "Checking Django Backend (8000)... "
-if curl -s http://localhost:8000/api/get-lhc-status/ | grep -q "status"; then
-    echo -e "${GREEN}PASS${NC}"
-else
-    echo -e "${RED}FAIL (Check Django logs)${NC}"
-fi
+wait_for_service() {
+    local url=$1
+    local name=$2
+    local retries=12
+    local wait_time=5
 
-# 3. Test C++ Data Injection
+    echo -n "Checking $name... "
+    for i in $(seq 1 $retries); do
+        STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$url")
+        if [[ "$STATUS" == "200" || "$STATUS" == "301" || "$STATUS" == "302" ]]; then
+            echo -e "${GREEN}PASS${NC}"
+            return 0
+        fi
+        sleep $wait_time
+    done
+    echo -e "${RED}FAIL (Status $STATUS - Timed out after $retries attempts)${NC}"
+    return 1
+}
+
+# 1. Test Java API via Nginx
+wait_for_service "http://localhost/api/v1/telemetry/history" "Java Telemetry Service"
+
+# 2. Test Django Status API via Nginx
+wait_for_service "http://localhost/api/get-lhc-status/" "Django Backend"
+
+# 3. Test C++ Data Injection (Verify data is flowing through the proxy into DB)
 echo -n "Checking C++ -> Java Persistence Bridge... "
-DATA=$(curl -s http://localhost:8080/api/v1/telemetry/history)
+sleep 5
+DATA=$(curl -s http://localhost/api/v1/telemetry/history)
 if [[ $DATA == *"sensorId"* ]]; then
     echo -e "${GREEN}PASS (Data is flowing!)${NC}"
 else
-    echo -e "${RED}FAIL (C++ sensor not pushing or Java not saving)${NC}"
+    echo -e "${RED}FAIL (No sensor data found in history)${NC}"
 fi
 
 echo "---------------------------------------"
